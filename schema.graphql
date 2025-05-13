@@ -1,0 +1,122 @@
+
+type ORMPHashImported @entity {
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+  chainId: BigInt!
+
+  srcChainId: BigInt!
+  targetChainId: BigInt!
+  oracle: String!
+  channel: String!
+  msgIndex: BigInt!
+  hash: String!
+}
+
+type ORMPMessageAccepted @entity{
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+  chainId: BigInt!
+
+  logIndex: Int!
+  msgHash: String!
+
+  channel: String!
+  index: BigInt!
+  fromChainId: BigInt!
+  from: String!
+  toChainId: BigInt!
+  to: String!
+  gasLimit: BigInt!
+  encoded: String!
+
+  # extra
+  oracle: String
+  oracleAssigned: Boolean
+  oracleAssignedFee: BigInt
+
+  relayer: String
+  relayerAssigned: Boolean
+  relayerAssignedFee: BigInt
+}
+
+type ORMPMessageAssigned @entity {
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+  chainId: BigInt!
+
+  msgHash: String!
+  oracle: String!
+  relayer: String!
+  oracleFee: BigInt!
+  relayerFee: BigInt!
+  params: String!
+}
+
+type ORMPMessageDispatched @entity {
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+  chainId: BigInt!
+
+  targetChainId: BigInt!
+  msgHash: String!
+  dispatchResult: Boolean!
+}
+
+type MsgportMessageRecv @entity {
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+  transactionIndex: Int!
+  logIndex: Int!
+  chainId: BigInt!
+
+  portAddress: String!
+
+  msgId: String!
+  result: Boolean!
+  returnData: String!
+}
+
+type MsgportMessageSent @entity {
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+  transactionIndex: Int!
+  logIndex: Int!
+  chainId: BigInt!
+
+  portAddress: String!
+  transactionFrom: String
+
+  fromChainId: BigInt!
+  msgId: String!
+  fromDapp: String!
+  toChainId: BigInt!
+  toDapp: String!
+  message: String!
+  params: String!
+}
+
+type SignaturePubSignatureSubmittion @entity {
+  id: ID!
+  blockNumber: BigInt!
+  transactionHash: String!
+  blockTimestamp: BigInt!
+
+  chainId: BigInt!
+  channel: String!
+  signer: String!
+  msgIndex: BigInt!
+  signature: String!
+  data: String!
+}

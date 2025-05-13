@@ -1,0 +1,21 @@
+name: Check Code
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+
+jobs:
+  check-code:
+    name: Check Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: yarn install
+
+      - name: Build
+        run: yarn build
