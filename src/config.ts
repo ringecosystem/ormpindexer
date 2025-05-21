@@ -114,6 +114,15 @@ export const ormpContractChains: OrmpContractChain[] = [
     startBlock: 59565,
     contracts: defaultOrmpContracts,
   },
+  // base
+  {
+    chainId: 8453,
+    rpcs: extractRpcEndpoint(8453, "wss://base-rpc.publicnode.com"),
+    gateway: "https://v2.archive.subsquid.io/network/base-mainnet",
+    finalityConfirmation: 20,
+    startBlock: 30508102,
+    contracts: defaultOrmpContracts,
+  },
   // tron
   {
     chainId: 728126428,
