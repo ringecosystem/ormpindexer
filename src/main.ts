@@ -10,13 +10,19 @@ interface RunProcessorOptions {
   ormpContract: OrmpContractChain;
 }
 
+function isGatewayDisabled(): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    (process.env.ORMPINDEX_DISABLE_GATEWAY ?? "").toLowerCase()
+  );
+}
+
 async function runProcessorEvm(options: RunProcessorOptions) {
   const { ormpContract } = options;
   const processor = new EvmBatchProcessor()
     .setRpcEndpoint(ormpContract.rpcs[0])
     .setFields(evmFieldSelection)
     .setFinalityConfirmation(ormpContract.finalityConfirmation ?? 50);
-  if (ormpContract.gateway) {
+  if (!isGatewayDisabled() && ormpContract.gateway) {
     processor.setGateway(ormpContract.gateway);
   }
   processor.addLog({
@@ -38,7 +44,7 @@ async function runProcessorTron(options: RunProcessorOptions) {
       strideSize: 1,
     })
     .setFields(tronFieldSelection);
-  if (ormpContract.gateway) {
+  if (!isGatewayDisabled() && ormpContract.gateway) {
     processor.setGateway(ormpContract.gateway);
   }
   processor.addLog({
