@@ -14,6 +14,7 @@ pub struct DatalensLogQuery {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DatalensLog {
     #[serde(default)]
     pub id: Option<String>,
