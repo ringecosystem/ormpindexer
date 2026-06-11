@@ -224,6 +224,21 @@ fn test_tron_native_graphql_request_uses_other_selector_shape() {
 }
 
 #[test]
+fn test_evm_native_graphql_request_uses_datalens_finality_enum() {
+    let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
+        chain_id: 42161,
+        from_block: 466_386_813,
+        to_block: 466_386_813,
+        contracts: vec!["0x2cd1867fb8016f93710b6386f7f9f1d540a60812".to_owned()],
+        topics: Vec::new(),
+        finality_mode: ormpindexer::config::FinalityMode::Finalized,
+    })
+    .expect("build EVM request");
+
+    assert_eq!(request["variables"]["input"]["finality"], "durable_only");
+}
+
+#[test]
 fn test_tron_native_graphql_request_rejects_invalid_contract_address() {
     let error = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
         chain_id: TRON_CHAIN_ID,

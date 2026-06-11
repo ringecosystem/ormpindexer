@@ -55,6 +55,9 @@ pub struct DatalensLogQueryResult {
 
 #[allow(async_fn_in_trait)]
 pub trait DatalensLogReader {
+    async fn latest_block(&self, chain_id: u64, finality_mode: FinalityMode)
+    -> anyhow::Result<u64>;
+
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult>;
 }
 
@@ -78,9 +81,46 @@ impl DatalensHttpClient {
             self.config.endpoint.trim_end_matches('/')
         )
     }
+
+    fn chain_head_endpoint(
+        &self,
+        chain_id: u64,
+        finality_mode: FinalityMode,
+    ) -> anyhow::Result<String> {
+        let chain_name = chain_name(chain_id)?;
+        Ok(format!(
+            "{}/v1/chains/{chain_name}/head?finality={}",
+            self.config.endpoint.trim_end_matches('/'),
+            chain_head_finality(finality_mode),
+        ))
+    }
 }
 
 impl DatalensLogReader for DatalensHttpClient {
+    async fn latest_block(
+        &self,
+        chain_id: u64,
+        finality_mode: FinalityMode,
+    ) -> anyhow::Result<u64> {
+        let mut builder = self
+            .http
+            .get(self.chain_head_endpoint(chain_id, finality_mode)?)
+            .header("x-datalens-application", &self.config.application);
+        if let Some(token) = &self.config.token {
+            builder = builder.bearer_auth(token.expose_secret());
+        }
+
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Datalens chain head query failed with status {status}: {body}");
+        }
+
+        let payload: ChainHeadResponse = response.json().await?;
+        Ok(payload.height)
+    }
+
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
         let request = native_graphql_request(&query)?;
         let mut builder = self
@@ -92,7 +132,12 @@ impl DatalensLogReader for DatalensHttpClient {
             builder = builder.bearer_auth(token.expose_secret());
         }
 
-        let response = builder.send().await?.error_for_status()?;
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Datalens log query failed with status {status}: {body}");
+        }
         let payload: serde_json::Value = response.json().await?;
         if let Some(errors) = payload.get("errors") {
             anyhow::bail!("Datalens log query returned errors: {errors}");
@@ -101,6 +146,11 @@ impl DatalensLogReader for DatalensHttpClient {
         let logs = logs_from_native_query_payload(&payload, query.chain_id)?;
         Ok(DatalensLogQueryResult { logs })
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+struct ChainHeadResponse {
+    height: u64,
 }
 
 pub fn native_graphql_request(query: &DatalensLogQuery) -> anyhow::Result<serde_json::Value> {
@@ -430,8 +480,23 @@ fn topic_filters(topics: &[String]) -> Vec<Vec<String>> {
 
 fn native_finality(finality_mode: FinalityMode) -> &'static str {
     match finality_mode {
-        FinalityMode::Finalized => "finalized",
+        FinalityMode::Finalized => "durable_only",
         FinalityMode::Durable => "durable_only",
+    }
+}
+
+fn chain_head_finality(finality_mode: FinalityMode) -> &'static str {
+    match finality_mode {
+        FinalityMode::Finalized => "finalized",
+        FinalityMode::Durable => "finalized",
+    }
+}
+
+fn chain_name(chain_id: u64) -> anyhow::Result<&'static str> {
+    if chain_id == TRON_CHAIN_ID {
+        tron_chain_name(chain_id)
+    } else {
+        evm_chain_name(chain_id)
     }
 }
 

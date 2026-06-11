@@ -53,11 +53,11 @@ pub fn decode_evm_log(log: &DatalensLog) -> anyhow::Result<LegacyOrmPEvent> {
 
     match topic0.as_str() {
         ORMP_HASH_IMPORTED_TOPIC => decode_hash_imported(metadata, &data),
-        ORMP_MESSAGE_ACCEPTED_TOPIC => decode_message_accepted(metadata, &data),
-        ORMP_MESSAGE_ASSIGNED_TOPIC => decode_message_assigned(metadata, &data),
-        ORMP_MESSAGE_DISPATCHED_TOPIC => decode_message_dispatched(metadata, &data),
-        MSGPORT_MESSAGE_RECV_TOPIC => decode_msgport_message_recv(metadata, &data),
-        MSGPORT_MESSAGE_SENT_TOPIC => decode_msgport_message_sent(metadata, &data),
+        ORMP_MESSAGE_ACCEPTED_TOPIC => decode_message_accepted(metadata, &log.topics, &data),
+        ORMP_MESSAGE_ASSIGNED_TOPIC => decode_message_assigned(metadata, &log.topics, &data),
+        ORMP_MESSAGE_DISPATCHED_TOPIC => decode_message_dispatched(metadata, &log.topics, &data),
+        MSGPORT_MESSAGE_RECV_TOPIC => decode_msgport_message_recv(metadata, &log.topics, &data),
+        MSGPORT_MESSAGE_SENT_TOPIC => decode_msgport_message_sent(metadata, &log.topics, &data),
         SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC => decode_signature_submittion(metadata, &data),
         _ => bail!("unsupported ORMP EVM event topic0 {topic0}"),
     }
@@ -280,8 +280,43 @@ fn decode_hash_imported(
 
 fn decode_message_accepted(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 1 {
+        let mut tokens = decode_event(
+            &[ParamType::Tuple(vec![
+                ParamType::Address,
+                ParamType::Uint(256),
+                ParamType::Uint(256),
+                ParamType::Address,
+                ParamType::Uint(256),
+                ParamType::Address,
+                ParamType::Uint(256),
+                ParamType::Bytes,
+            ])],
+            data,
+        )?;
+        let message = take(&mut tokens, "message")?;
+        let Token::Tuple(mut message) = message else {
+            bail!("message is not an ABI tuple");
+        };
+        ensure!(message.len() == 8, "message tuple must contain 8 fields");
+
+        return Ok(LegacyOrmPEvent::MessageAccepted {
+            metadata,
+            msg_hash: topic_fixed_bytes(topics, 1, "msgHash")?,
+            channel: token_address(take(&mut message, "message.channel")?)?,
+            index: token_uint(take(&mut message, "message.index")?)?,
+            from_chain_id: token_uint(take(&mut message, "message.fromChainId")?)?,
+            from: token_address(take(&mut message, "message.from")?)?,
+            to_chain_id: token_uint(take(&mut message, "message.toChainId")?)?,
+            to: token_address(take(&mut message, "message.to")?)?,
+            gas_limit: token_uint(take(&mut message, "message.gasLimit")?)?,
+            encoded: token_bytes(take(&mut message, "message.encoded")?)?,
+        });
+    }
+
     let mut tokens = decode_event(
         &[
             ParamType::FixedBytes(32),
@@ -321,8 +356,25 @@ fn decode_message_accepted(
 
 fn decode_message_assigned(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 3 {
+        let mut tokens = decode_event(
+            &[ParamType::Uint(256), ParamType::Uint(256), ParamType::Bytes],
+            data,
+        )?;
+        return Ok(LegacyOrmPEvent::MessageAssigned {
+            metadata,
+            msg_hash: topic_fixed_bytes(topics, 1, "msgHash")?,
+            oracle: topic_address(topics, 2, "oracle")?,
+            relayer: topic_address(topics, 3, "relayer")?,
+            oracle_fee: token_uint(take(&mut tokens, "oracleFee")?)?,
+            relayer_fee: token_uint(take(&mut tokens, "relayerFee")?)?,
+            params: token_bytes(take(&mut tokens, "params")?)?,
+        });
+    }
+
     let mut tokens = decode_event(
         &[
             ParamType::FixedBytes(32),
@@ -347,8 +399,19 @@ fn decode_message_assigned(
 
 fn decode_message_dispatched(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 1 {
+        let mut tokens = decode_event(&[ParamType::Bool], data)?;
+        return Ok(LegacyOrmPEvent::MessageDispatched {
+            target_chain_id: metadata.chain_id,
+            metadata,
+            msg_hash: topic_fixed_bytes(topics, 1, "msgHash")?,
+            dispatch_result: token_bool(take(&mut tokens, "dispatchResult")?)?,
+        });
+    }
+
     let mut tokens = decode_event(&[ParamType::FixedBytes(32), ParamType::Bool], data)?;
     Ok(LegacyOrmPEvent::MessageDispatched {
         target_chain_id: metadata.chain_id,
@@ -360,8 +423,19 @@ fn decode_message_dispatched(
 
 fn decode_msgport_message_recv(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 1 {
+        let mut tokens = decode_event(&[ParamType::Bool, ParamType::Bytes], data)?;
+        return Ok(LegacyOrmPEvent::MsgportMessageRecv {
+            metadata,
+            msg_id: topic_fixed_bytes(topics, 1, "msgId")?,
+            result: token_bool(take(&mut tokens, "result")?)?,
+            return_data: token_bytes(take(&mut tokens, "returnData")?)?,
+        });
+    }
+
     let mut tokens = decode_event(
         &[ParamType::FixedBytes(32), ParamType::Bool, ParamType::Bytes],
         data,
@@ -376,8 +450,31 @@ fn decode_msgport_message_recv(
 
 fn decode_msgport_message_sent(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 1 {
+        let mut tokens = decode_event(
+            &[
+                ParamType::Address,
+                ParamType::Uint(256),
+                ParamType::Address,
+                ParamType::Bytes,
+                ParamType::Bytes,
+            ],
+            data,
+        )?;
+        return Ok(LegacyOrmPEvent::MsgportMessageSent {
+            metadata,
+            msg_id: topic_fixed_bytes(topics, 1, "msgId")?,
+            from_dapp: token_address(take(&mut tokens, "fromDapp")?)?,
+            to_chain_id: token_uint(take(&mut tokens, "toChainId")?)?,
+            to_dapp: token_address(take(&mut tokens, "toDapp")?)?,
+            message: token_bytes(take(&mut tokens, "message")?)?,
+            params: token_bytes(take(&mut tokens, "params")?)?,
+        });
+    }
+
     let mut tokens = decode_event(
         &[
             ParamType::FixedBytes(32),
@@ -473,6 +570,33 @@ fn token_uint(token: Token) -> anyhow::Result<u128> {
         }
         _ => bail!("ABI token is not uint"),
     }
+}
+
+fn topic_fixed_bytes(topics: &[String], index: usize, name: &str) -> anyhow::Result<String> {
+    let topic = topics
+        .get(index)
+        .with_context(|| format!("EVM indexed topic {name} is missing"))?;
+    let topic = normalize_hex(topic)?;
+    ensure!(
+        topic.len() == 66,
+        "EVM indexed topic {name} must be 32 bytes"
+    );
+    Ok(topic)
+}
+
+fn topic_address(topics: &[String], index: usize, name: &str) -> anyhow::Result<String> {
+    let topic = topics
+        .get(index)
+        .with_context(|| format!("EVM indexed topic {name} is missing"))?;
+    let topic = normalize_hex(topic)?;
+    let address = topic
+        .strip_prefix("0x")
+        .context("normalized topic is missing 0x prefix")?;
+    ensure!(
+        address.len() == 64,
+        "EVM indexed topic {name} must be 32 bytes"
+    );
+    Ok(format!("0x{}", &address[24..64]))
 }
 
 fn normalize_hex(value: &str) -> anyhow::Result<String> {

@@ -83,14 +83,32 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
         }])
         .await
         .expect("write accepted after assigned");
-    let late = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-        "SELECT oracle, relayer FROM ormp_message_accepted WHERE id = $1",
+    let late = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<bool>,
+            Option<String>,
+            Option<String>,
+            Option<bool>,
+            Option<String>,
+        ),
+    >(
+        r#"SELECT oracle, oracle_assigned, oracle_assigned_fee::TEXT,
+                  relayer, relayer_assigned, relayer_assigned_fee::TEXT
+           FROM ormp_message_accepted
+           WHERE id = $1"#,
     )
     .bind("0xlate")
     .fetch_one(&pool)
     .await
     .expect("fetch late accepted row");
-    assert_eq!(late, (None, None));
+    assert_eq!(late.0.as_deref(), Some(ADDRESS_ORACLE[0]));
+    assert_eq!(late.1, Some(true));
+    assert_eq!(late.2.as_deref(), Some("55"));
+    assert_eq!(late.3.as_deref(), Some(ADDRESS_RELAYER[0]));
+    assert_eq!(late.4, Some(true));
+    assert_eq!(late.5.as_deref(), Some("66"));
 }
 
 fn legacy_events() -> Vec<LegacyOrmPEvent> {

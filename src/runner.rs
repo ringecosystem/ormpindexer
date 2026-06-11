@@ -64,14 +64,34 @@ where
                 .checkpoints
                 .read_or_create(chain.chain_id, dataset, chain.start_block)
                 .await?;
-            let range = plan_next_range(&checkpoint, self.config.batch_size)?;
+            let target_block = self
+                .reader
+                .latest_block(chain.chain_id, self.config.finality_mode)
+                .await
+                .with_context(|| {
+                    format!("query Datalens chain head for chain {}", chain.chain_id)
+                })?;
+            if checkpoint.next_block > target_block {
+                log::info!(
+                    "skipping ORMP Datalens chain_id={} dataset={} checkpoint_next_block={} target_block={} checkpoint_ahead_of_target=true",
+                    chain.chain_id,
+                    dataset,
+                    checkpoint.next_block,
+                    target_block,
+                );
+                continue;
+            }
+
+            let mut range = plan_next_range(&checkpoint, self.config.batch_size)?;
+            range.to_block = range.to_block.min(target_block);
 
             log::info!(
-                "querying ORMP Datalens logs chain_id={} dataset={} from_block={} to_block={} batch_size={} contracts={} topics={} finality={}",
+                "querying ORMP Datalens logs chain_id={} dataset={} from_block={} to_block={} target_block={} batch_size={} contracts={} topics={} finality={}",
                 chain.chain_id,
                 dataset,
                 range.from_block,
                 range.to_block,
+                target_block,
                 self.config.batch_size,
                 chain.contracts.len(),
                 chain.topics.len(),
@@ -103,11 +123,12 @@ where
                 .await?;
 
             log::info!(
-                "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true",
+                "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true",
                 chain.chain_id,
                 dataset,
                 range.from_block,
                 range.to_block,
+                target_block,
                 result.logs.len(),
                 events.len(),
                 written,

@@ -160,7 +160,9 @@ async fn write_legacy_event(
             insert_hash_imported(tx, OrmpHashImportedRow::from_event(event)).await
         }
         LegacyOrmPEvent::MessageAccepted { .. } => {
-            insert_message_accepted(tx, OrmpMessageAcceptedRow::from_event(event)).await
+            let row = OrmpMessageAcceptedRow::from_event(event);
+            insert_message_accepted(tx, row.clone()).await?;
+            backfill_accepted_assignment(tx, &row, assignment_config).await
         }
         LegacyOrmPEvent::MessageAssigned { .. } => {
             let row = OrmpMessageAssignedRow::from_event(event);
@@ -357,6 +359,74 @@ async fn backfill_message_assignment(
     .context("backfill ormp_message_accepted assignment fields")?;
 
     Ok(())
+}
+
+async fn backfill_accepted_assignment(
+    tx: &mut Transaction<'_, Postgres>,
+    row: &OrmpMessageAcceptedRow,
+    assignment_config: &AssignmentConfig,
+) -> anyhow::Result<()> {
+    let assignments = sqlx::query_as::<_, OrmpMessageAssignedDbRow>(
+        "SELECT
+            id,
+            block_number::TEXT AS block_number,
+            transaction_hash,
+            block_timestamp::TEXT AS block_timestamp,
+            chain_id::TEXT AS chain_id,
+            msg_hash,
+            oracle,
+            relayer,
+            oracle_fee::TEXT AS oracle_fee,
+            relayer_fee::TEXT AS relayer_fee,
+            params
+         FROM ormp_message_assigned
+         WHERE msg_hash = $1
+         ORDER BY block_number ASC, id ASC",
+    )
+    .bind(&row.msg_hash)
+    .fetch_all(&mut **tx)
+    .await
+    .context("load existing ormp_message_assigned rows for accepted backfill")?;
+
+    for assignment in assignments {
+        let assignment = assignment.into_schema_row()?;
+        backfill_message_assignment(tx, &assignment, assignment_config).await?;
+    }
+
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct OrmpMessageAssignedDbRow {
+    id: String,
+    block_number: String,
+    transaction_hash: String,
+    block_timestamp: String,
+    chain_id: String,
+    msg_hash: String,
+    oracle: String,
+    relayer: String,
+    oracle_fee: String,
+    relayer_fee: String,
+    params: String,
+}
+
+impl OrmpMessageAssignedDbRow {
+    fn into_schema_row(self) -> anyhow::Result<OrmpMessageAssignedRow> {
+        Ok(OrmpMessageAssignedRow {
+            id: self.id,
+            block_number: self.block_number.parse()?,
+            transaction_hash: self.transaction_hash,
+            block_timestamp: self.block_timestamp.parse()?,
+            chain_id: self.chain_id.parse()?,
+            msg_hash: self.msg_hash,
+            oracle: self.oracle,
+            relayer: self.relayer,
+            oracle_fee: self.oracle_fee.parse()?,
+            relayer_fee: self.relayer_fee.parse()?,
+            params: self.params,
+        })
+    }
 }
 
 async fn insert_message_dispatched(

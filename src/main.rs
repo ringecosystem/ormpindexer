@@ -5,7 +5,7 @@ use ormpindexer::{
     config::RuntimeConfig,
     database,
     graphql::{build_router, build_schema},
-    runtime::{migrate, run},
+    runtime::{migrate, run, run_with_server},
 };
 
 #[derive(Debug, Parser)]
@@ -20,6 +20,9 @@ enum Command {
     Run {
         #[arg(long)]
         once: bool,
+
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen_addr: String,
     },
     Serve {
         #[arg(long, default_value = "0.0.0.0:8080")]
@@ -34,7 +37,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { once } => run(once).await,
+        Command::Run { once, listen_addr } => {
+            if once {
+                run(true).await
+            } else {
+                run_with_server(&listen_addr).await
+            }
+        }
         Command::Serve { listen_addr } => serve(&listen_addr).await,
         Command::Migrate => migrate().await,
     }
