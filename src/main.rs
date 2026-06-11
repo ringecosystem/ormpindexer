@@ -44,7 +44,7 @@ async fn serve(listen_addr: &str) -> anyhow::Result<()> {
     let database_url = RuntimeConfig::database_url_from_env()?;
     let pool = database::connect(&database_url, 5).await?;
     database::apply_migrations(&pool).await?;
-    let app = build_router(build_schema(pool));
+    let app = build_router(build_schema(pool.clone()), pool);
     let listener = tokio::net::TcpListener::bind(listen_addr)
         .await
         .with_context(|| format!("bind GraphQL server to {listen_addr}"))?;

@@ -22,3 +22,6 @@ sqlx = { version = "0.8.6", default-features = false, features = ["macros", "mig
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
 tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt"] }
+
+[dev-dependencies]
+tower = { version = "0.5.2", features = ["util"] }

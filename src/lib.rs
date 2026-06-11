@@ -4,6 +4,7 @@ pub mod database;
 pub mod datalens;
 pub mod decoder;
 pub mod graphql;
+pub mod ops;
 pub mod planner;
 pub mod runner;
 pub mod runtime;
