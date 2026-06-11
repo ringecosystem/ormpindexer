@@ -1,7 +1,12 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
-use ormpindexer::runtime::{migrate, run};
+use ormpindexer::{
+    config::RuntimeConfig,
+    database,
+    graphql::{build_router, build_schema},
+    runtime::{migrate, run},
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "ormpindexer")]
@@ -16,6 +21,10 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    Serve {
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen_addr: String,
+    },
     Migrate,
 }
 
@@ -26,8 +35,22 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Run { once } => run(once).await,
+        Command::Serve { listen_addr } => serve(&listen_addr).await,
         Command::Migrate => migrate().await,
     }
+}
+
+async fn serve(listen_addr: &str) -> anyhow::Result<()> {
+    let database_url = RuntimeConfig::database_url_from_env()?;
+    let pool = database::connect(&database_url, 5).await?;
+    database::apply_migrations(&pool).await?;
+    let app = build_router(build_schema(pool));
+    let listener = tokio::net::TcpListener::bind(listen_addr)
+        .await
+        .with_context(|| format!("bind GraphQL server to {listen_addr}"))?;
+    axum::serve(listener, app)
+        .await
+        .context("serve GraphQL server")
 }
 
 fn init_logging() -> anyhow::Result<()> {
