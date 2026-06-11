@@ -240,10 +240,10 @@ fn evm_expected_rows() -> Vec<CompatibilityRow> {
 }
 
 fn tron_expected_rows() -> Vec<CompatibilityRow> {
-    let msg_hash = bytes_hex(0x11);
-    let hash = bytes_hex(0x22);
+    let msg_hash = bytes_hex(0x55);
+    let hash = bytes_hex(0x66);
     let msg_id = bytes_hex(0x33);
-    let dispatch_hash = bytes_hex(0x44);
+    let dispatch_hash = bytes_hex(0x77);
 
     let mut rows = vec![
         CompatibilityRow::OrmpHashImported(OrmpHashImportedRow {
@@ -505,7 +505,7 @@ fn tron_fixture_logs() -> Vec<DatalensLog> {
                 "chainId": "46",
                 "channel": "41BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
                 "msgIndex": "7",
-                "hash": bytes_hex(0x22)
+                "hash": bytes_hex(0x66)
             }),
         ),
         tron_log(
@@ -516,7 +516,7 @@ fn tron_fixture_logs() -> Vec<DatalensLog> {
             "tron-message-accepted",
             "MessageAccepted",
             serde_json::json!({
-                "msgHash": bytes_hex(0x11),
+                "msgHash": bytes_hex(0x55),
                 "message": {
                     "channel": "41CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
                     "index": "8",
@@ -537,7 +537,7 @@ fn tron_fixture_logs() -> Vec<DatalensLog> {
             "tron-message-assigned",
             "MessageAssigned",
             serde_json::json!({
-                "msgHash": bytes_hex(0x11),
+                "msgHash": bytes_hex(0x55),
                 "oracle": ormpindexer::schema::ADDRESS_ORACLE[0],
                 "relayer": ormpindexer::schema::ADDRESS_RELAYER[0],
                 "oracleFee": "9",
@@ -553,7 +553,7 @@ fn tron_fixture_logs() -> Vec<DatalensLog> {
             "tron-message-dispatched",
             "MessageDispatched",
             serde_json::json!({
-                "msgHash": bytes_hex(0x44),
+                "msgHash": bytes_hex(0x77),
                 "dispatchResult": true
             }),
         ),
