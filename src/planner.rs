@@ -25,6 +25,21 @@ pub const SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC: &str =
     "0x8b3975e4768e70d323e926e2cef0676fc9a3250437d9b8f90b52c770f0d7545f";
 
 pub const PRODUCTION_EVM_CHAIN_IDS: &[u64] = &[1, 46, 137, 42161];
+pub const EVM_LOGS_DATASET: &str = "evm.logs";
+pub const TRON_CHAIN_ID: u64 = 728_126_428;
+pub const TRON_EVENTS_DATASET: &str = "tron.events";
+
+pub const TRON_MSGPORT_ADDRESS: &str = "0x2cd1867Fb8016f93710B6386f7f9F1D540A60812";
+pub const TRON_ORMP_ADDRESS: &str = "0x13b2211a7cA45Db2808F6dB05557ce5347e3634e";
+pub const TRON_SIGNATURE_PUB_ADDRESS: &str = "0x57Aa601A0377f5AB313C5A955ee874f5D495fC92";
+
+pub const TRON_HASH_IMPORTED_EVENT: &str = "HashImported";
+pub const TRON_MESSAGE_ACCEPTED_EVENT: &str = "MessageAccepted";
+pub const TRON_MESSAGE_ASSIGNED_EVENT: &str = "MessageAssigned";
+pub const TRON_MESSAGE_DISPATCHED_EVENT: &str = "MessageDispatched";
+pub const TRON_MESSAGE_RECV_EVENT: &str = "MessageRecv";
+pub const TRON_MESSAGE_SENT_EVENT: &str = "MessageSent";
+pub const TRON_SIGNATURE_SUBMITTION_EVENT: &str = "SignatureSubmittion";
 
 const DEFAULT_EVM_CHAINS: &[DefaultEvmChain] = &[
     DefaultEvmChain {
@@ -103,8 +118,47 @@ pub fn default_evm_chain_config(chain_id: u64) -> anyhow::Result<ChainConfig> {
     })
 }
 
+pub fn default_chain_config(chain_id: u64) -> anyhow::Result<ChainConfig> {
+    if chain_id == TRON_CHAIN_ID {
+        return default_tron_chain_config();
+    }
+
+    default_evm_chain_config(chain_id)
+        .map_err(|_| anyhow::anyhow!("unconfigured ORMP chain {chain_id}"))
+}
+
+pub fn default_tron_chain_config() -> anyhow::Result<ChainConfig> {
+    Ok(ChainConfig {
+        chain_id: TRON_CHAIN_ID,
+        start_block: 0,
+        contracts: vec![
+            TRON_MSGPORT_ADDRESS.to_owned(),
+            TRON_ORMP_ADDRESS.to_owned(),
+            TRON_SIGNATURE_PUB_ADDRESS.to_owned(),
+        ],
+        topics: vec![
+            TRON_MESSAGE_RECV_EVENT.to_owned(),
+            TRON_MESSAGE_SENT_EVENT.to_owned(),
+            TRON_HASH_IMPORTED_EVENT.to_owned(),
+            TRON_MESSAGE_ACCEPTED_EVENT.to_owned(),
+            TRON_MESSAGE_ASSIGNED_EVENT.to_owned(),
+            TRON_MESSAGE_DISPATCHED_EVENT.to_owned(),
+            TRON_SIGNATURE_SUBMITTION_EVENT.to_owned(),
+        ],
+    })
+}
+
+pub fn chain_dataset(chain_id: u64) -> anyhow::Result<&'static str> {
+    if chain_id == TRON_CHAIN_ID {
+        return Ok(TRON_EVENTS_DATASET);
+    }
+
+    default_evm_chain_config(chain_id)?;
+    Ok(EVM_LOGS_DATASET)
+}
+
 pub fn plan_evm_log_queries(
-    dataset: &str,
+    _dataset: &str,
     chain: &ChainConfig,
     from_block: u64,
     to_block: u64,
@@ -134,7 +188,54 @@ pub fn plan_evm_log_queries(
     while next_from <= to_block {
         let range_end = next_from.saturating_add(max_range_len - 1).min(to_block);
         plans.push(PlannedDatalensLogQuery {
-            dataset: dataset.to_owned(),
+            dataset: EVM_LOGS_DATASET.to_owned(),
+            query: DatalensLogQuery {
+                chain_id: chain.chain_id,
+                from_block: next_from,
+                to_block: range_end,
+                contracts: chain.contracts.clone(),
+                topics: chain.topics.clone(),
+                finality_mode,
+            },
+        });
+
+        if range_end == u64::MAX {
+            break;
+        }
+        next_from = range_end + 1;
+    }
+
+    Ok(plans)
+}
+
+pub fn plan_tron_event_queries(
+    _dataset: &str,
+    chain: &ChainConfig,
+    from_block: u64,
+    to_block: u64,
+    max_range_len: u64,
+    finality_mode: FinalityMode,
+) -> anyhow::Result<Vec<PlannedDatalensLogQuery>> {
+    ensure!(
+        max_range_len > 0,
+        "max range length must be greater than zero"
+    );
+    ensure!(
+        from_block <= to_block,
+        "from block must be less than or equal to to block"
+    );
+    ensure!(
+        !chain.contracts.is_empty(),
+        "Tron event query planner requires at least one contract address"
+    );
+
+    let mut plans = Vec::new();
+    let mut next_from = from_block;
+
+    while next_from <= to_block {
+        let range_end = next_from.saturating_add(max_range_len - 1).min(to_block);
+        plans.push(PlannedDatalensLogQuery {
+            dataset: TRON_EVENTS_DATASET.to_owned(),
             query: DatalensLogQuery {
                 chain_id: chain.chain_id,
                 from_block: next_from,
