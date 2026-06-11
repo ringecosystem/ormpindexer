@@ -1,5 +1,7 @@
 use tokio::time::sleep;
 
+use anyhow::Context;
+
 use crate::{
     checkpoint::{CheckpointStore, plan_next_range},
     config::RuntimeConfig,
@@ -90,9 +92,16 @@ where
                 events.extend(self.decoder.decode(log).await?);
             }
             let written = self.writer.write_events(&events).await?;
+            let next_block = range
+                .to_block
+                .checked_add(1)
+                .context("checkpoint next block overflow")?;
+            self.checkpoints
+                .advance(chain.chain_id, &self.config.dataset, next_block)
+                .await?;
 
             log::info!(
-                "ORMP Datalens dry-run batch completed chain_id={} dataset={} from_block={} to_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=false",
+                "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true",
                 chain.chain_id,
                 self.config.dataset,
                 range.from_block,
@@ -100,7 +109,7 @@ where
                 result.logs.len(),
                 events.len(),
                 written,
-                checkpoint.next_block,
+                next_block,
             );
 
             report.chains_processed += 1;
@@ -108,6 +117,7 @@ where
             report.records_read += result.logs.len() as u64;
             report.records_decoded += events.len() as u64;
             report.records_written += written as u64;
+            report.checkpoints_advanced += 1;
         }
 
         Ok(report)

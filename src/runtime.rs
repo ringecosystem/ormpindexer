@@ -2,9 +2,9 @@ use anyhow::Context;
 
 use crate::{
     config::RuntimeConfig,
-    database::{DryRunEventWriter, PostgresCheckpointStore, apply_migrations, connect},
+    database::{PostgresCheckpointStore, PostgresEventWriter, apply_migrations, connect},
     datalens::DatalensHttpClient,
-    decoder::NoopDecoder,
+    decoder::EvmEventDecoder,
     runner::IndexerRunner,
 };
 
@@ -18,7 +18,7 @@ pub async fn run(run_once: bool) -> anyhow::Result<()> {
     apply_migrations(&pool).await?;
 
     log::info!(
-        "starting ORMP Datalens indexer endpoint={} application={} token_configured={} database_configured=true chains={} batch_size={} dataset={} finality={} dry_run=true",
+        "starting ORMP Datalens indexer endpoint={} application={} token_configured={} database_configured=true chains={} batch_size={} dataset={} finality={} dry_run=false",
         config.datalens.endpoint,
         config.datalens.application,
         config.datalens.token.is_some(),
@@ -31,9 +31,9 @@ pub async fn run(run_once: bool) -> anyhow::Result<()> {
     let runner = IndexerRunner::new(
         config.clone(),
         DatalensHttpClient::new(config.datalens.clone()),
-        PostgresCheckpointStore::new(pool),
-        NoopDecoder,
-        DryRunEventWriter,
+        PostgresCheckpointStore::new(pool.clone()),
+        EvmEventDecoder,
+        PostgresEventWriter::new(pool),
     );
 
     if run_once {

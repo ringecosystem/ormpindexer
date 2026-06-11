@@ -3,10 +3,11 @@ use std::{cell::RefCell, collections::BTreeMap};
 use ormpindexer::{
     checkpoint::{Checkpoint, InMemoryCheckpointStore, plan_next_range},
     config::{FinalityMode, RuntimeConfig},
-    database::DryRunEventWriter,
+    database::{DryRunEventWriter, EventWriter},
     datalens::{DatalensLog, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader},
     decoder::NoopDecoder,
     runner::{IndexerRunner, RunnerReport},
+    schema::LegacyOrmPEvent,
 };
 
 #[test]
@@ -102,7 +103,7 @@ fn test_plan_next_range_uses_checkpoint_and_batch_size() {
 }
 
 #[tokio::test]
-async fn test_runner_dry_run_queries_datalens_and_leaves_checkpoint_unchanged() {
+async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
     let env = BTreeMap::from([
         (
             "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
@@ -144,7 +145,7 @@ async fn test_runner_dry_run_queries_datalens_and_leaves_checkpoint_unchanged() 
         DryRunEventWriter,
     );
 
-    let report = runner.run_once().await.expect("dry run pass succeeds");
+    let report = runner.run_once().await.expect("batch pass succeeds");
 
     assert_eq!(
         report,
@@ -154,12 +155,135 @@ async fn test_runner_dry_run_queries_datalens_and_leaves_checkpoint_unchanged() 
             records_read: 1,
             records_decoded: 0,
             records_written: 0,
-            checkpoints_advanced: 0,
+            checkpoints_advanced: 1,
         }
     );
     assert_eq!(
         checkpoints.next_block(46, "datalens-native").await.unwrap(),
+        15
+    );
+}
+
+#[tokio::test]
+async fn test_runner_empty_logs_still_advance_after_successful_query_and_write() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let runner = IndexerRunner::new(
+        config,
+        RecordingDatalensReader::new(Vec::new()),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("empty batch succeeds");
+
+    assert_eq!(report.checkpoints_advanced, 1);
+    assert_eq!(
+        checkpoints.next_block(46, "datalens-native").await.unwrap(),
+        15
+    );
+}
+
+#[tokio::test]
+async fn test_runner_writer_failure_does_not_advance_checkpoint() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let runner = IndexerRunner::new(
+        config,
+        RecordingDatalensReader::new(Vec::new()),
+        checkpoints.clone(),
+        NoopDecoder,
+        FailingEventWriter,
+    );
+
+    let error = runner
+        .run_once()
+        .await
+        .expect_err("writer failure fails the batch");
+
+    assert!(error.to_string().contains("write failed"));
+    assert_eq!(
+        checkpoints.next_block(46, "datalens-native").await.unwrap(),
         10
+    );
+}
+
+#[tokio::test]
+async fn test_runner_reports_and_advances_multiple_chains() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "1,46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+        (
+            "ORMPINDEXER_CHAIN_46_START_BLOCK".to_owned(),
+            "20".to_owned(),
+        ),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let runner = IndexerRunner::new(
+        config,
+        RecordingDatalensReader::new(Vec::new()),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("multi-chain pass succeeds");
+
+    assert_eq!(
+        report,
+        RunnerReport {
+            chains_processed: 2,
+            ranges_queried: 2,
+            records_read: 0,
+            records_decoded: 0,
+            records_written: 0,
+            checkpoints_advanced: 2,
+        }
+    );
+    assert_eq!(
+        checkpoints.next_block(1, "datalens-native").await.unwrap(),
+        15
+    );
+    assert_eq!(
+        checkpoints.next_block(46, "datalens-native").await.unwrap(),
+        25
     );
 }
 
@@ -183,5 +307,13 @@ impl DatalensLogReader for RecordingDatalensReader {
         Ok(DatalensLogQueryResult {
             logs: self.logs.clone(),
         })
+    }
+}
+
+struct FailingEventWriter;
+
+impl EventWriter for FailingEventWriter {
+    async fn write_events(&self, _events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
+        anyhow::bail!("write failed");
     }
 }
