@@ -1,7 +1,15 @@
 use anyhow::Context;
-use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
 
-use crate::{checkpoint::CheckpointStore, config::SecretString, schema::LegacyOrmPEvent};
+use crate::{
+    checkpoint::CheckpointStore,
+    config::SecretString,
+    schema::{
+        AssignmentConfig, LegacyOrmPEvent, MsgportMessageRecvRow, MsgportMessageSentRow,
+        OrmpHashImportedRow, OrmpMessageAcceptedRow, OrmpMessageAssignedRow,
+        OrmpMessageDispatchedRow, SignaturePubSignatureSubmittionRow,
+    },
+};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -98,20 +106,428 @@ impl EventWriter for DryRunEventWriter {
 
 #[derive(Clone)]
 pub struct PostgresEventWriter {
-    _pool: PgPool,
+    pool: PgPool,
+    assignment_config: AssignmentConfig,
 }
 
 impl PostgresEventWriter {
     pub fn new(pool: PgPool) -> Self {
-        Self { _pool: pool }
+        Self {
+            pool,
+            assignment_config: AssignmentConfig::legacy_defaults(),
+        }
+    }
+
+    pub fn with_assignment_config(pool: PgPool, assignment_config: AssignmentConfig) -> Self {
+        Self {
+            pool,
+            assignment_config,
+        }
     }
 }
 
 impl EventWriter for PostgresEventWriter {
     async fn write_events(&self, events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
-        if !events.is_empty() {
-            anyhow::bail!("ORMP event database writes are not implemented yet");
+        if events.is_empty() {
+            return Ok(0);
         }
-        Ok(0)
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin ORMP legacy event write transaction")?;
+
+        for event in events {
+            write_legacy_event(&mut tx, event.clone(), &self.assignment_config).await?;
+        }
+
+        tx.commit()
+            .await
+            .context("commit ORMP legacy event write transaction")?;
+
+        Ok(events.len())
     }
+}
+
+async fn write_legacy_event(
+    tx: &mut Transaction<'_, Postgres>,
+    event: LegacyOrmPEvent,
+    assignment_config: &AssignmentConfig,
+) -> anyhow::Result<()> {
+    match event {
+        LegacyOrmPEvent::HashImported { .. } => {
+            insert_hash_imported(tx, OrmpHashImportedRow::from_event(event)).await
+        }
+        LegacyOrmPEvent::MessageAccepted { .. } => {
+            insert_message_accepted(tx, OrmpMessageAcceptedRow::from_event(event)).await
+        }
+        LegacyOrmPEvent::MessageAssigned { .. } => {
+            let row = OrmpMessageAssignedRow::from_event(event);
+            insert_message_assigned(tx, &row).await?;
+            backfill_message_assignment(tx, &row, assignment_config).await
+        }
+        LegacyOrmPEvent::MessageDispatched { .. } => {
+            insert_message_dispatched(tx, OrmpMessageDispatchedRow::from_event(event)).await
+        }
+        LegacyOrmPEvent::MsgportMessageRecv { .. } => {
+            insert_msgport_message_recv(tx, MsgportMessageRecvRow::from_event(event)).await
+        }
+        LegacyOrmPEvent::MsgportMessageSent { .. } => {
+            insert_msgport_message_sent(tx, MsgportMessageSentRow::from_event(event)).await
+        }
+        LegacyOrmPEvent::SignatureSubmittion { .. } => {
+            insert_signature_submittion(tx, SignaturePubSignatureSubmittionRow::from_event(event))
+                .await
+        }
+    }
+}
+
+async fn insert_hash_imported(
+    tx: &mut Transaction<'_, Postgres>,
+    row: OrmpHashImportedRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO ormp_hash_imported (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            src_chain_id, target_chain_id, oracle, channel, msg_index, hash
+         )
+         VALUES (
+            $1, $2::NUMERIC, $3, $4::NUMERIC, $5::NUMERIC,
+            $6::NUMERIC, $7::NUMERIC, $8, $9, $10::NUMERIC, $11
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            chain_id = EXCLUDED.chain_id,
+            src_chain_id = EXCLUDED.src_chain_id,
+            target_chain_id = EXCLUDED.target_chain_id,
+            oracle = EXCLUDED.oracle,
+            channel = EXCLUDED.channel,
+            msg_index = EXCLUDED.msg_index,
+            hash = EXCLUDED.hash",
+    )
+    .bind(row.id)
+    .bind(row.block_number.to_string())
+    .bind(row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.chain_id.to_string())
+    .bind(row.src_chain_id.to_string())
+    .bind(row.target_chain_id.to_string())
+    .bind(row.oracle)
+    .bind(row.channel)
+    .bind(row.msg_index.to_string())
+    .bind(row.hash)
+    .execute(&mut **tx)
+    .await
+    .context("upsert ormp_hash_imported row")?;
+
+    Ok(())
+}
+
+async fn insert_message_accepted(
+    tx: &mut Transaction<'_, Postgres>,
+    row: OrmpMessageAcceptedRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"INSERT INTO ormp_message_accepted (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            log_index, msg_hash, channel, "index", from_chain_id, "from",
+            to_chain_id, "to", gas_limit, encoded
+         )
+         VALUES (
+            $1, $2::NUMERIC, $3, $4::NUMERIC, $5::NUMERIC,
+            $6, $7, $8, $9::NUMERIC, $10::NUMERIC, $11,
+            $12::NUMERIC, $13, $14::NUMERIC, $15
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            chain_id = EXCLUDED.chain_id,
+            log_index = EXCLUDED.log_index,
+            msg_hash = EXCLUDED.msg_hash,
+            channel = EXCLUDED.channel,
+            "index" = EXCLUDED."index",
+            from_chain_id = EXCLUDED.from_chain_id,
+            "from" = EXCLUDED."from",
+            to_chain_id = EXCLUDED.to_chain_id,
+            "to" = EXCLUDED."to",
+            gas_limit = EXCLUDED.gas_limit,
+            encoded = EXCLUDED.encoded"#,
+    )
+    .bind(row.id)
+    .bind(row.block_number.to_string())
+    .bind(row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.chain_id.to_string())
+    .bind(row.log_index)
+    .bind(row.msg_hash)
+    .bind(row.channel)
+    .bind(row.index.to_string())
+    .bind(row.from_chain_id.to_string())
+    .bind(row.from)
+    .bind(row.to_chain_id.to_string())
+    .bind(row.to)
+    .bind(row.gas_limit.to_string())
+    .bind(row.encoded)
+    .execute(&mut **tx)
+    .await
+    .context("upsert ormp_message_accepted row")?;
+
+    Ok(())
+}
+
+async fn insert_message_assigned(
+    tx: &mut Transaction<'_, Postgres>,
+    row: &OrmpMessageAssignedRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO ormp_message_assigned (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            msg_hash, oracle, relayer, oracle_fee, relayer_fee, params
+         )
+         VALUES (
+            $1, $2::NUMERIC, $3, $4::NUMERIC, $5::NUMERIC,
+            $6, $7, $8, $9::NUMERIC, $10::NUMERIC, $11
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            chain_id = EXCLUDED.chain_id,
+            msg_hash = EXCLUDED.msg_hash,
+            oracle = EXCLUDED.oracle,
+            relayer = EXCLUDED.relayer,
+            oracle_fee = EXCLUDED.oracle_fee,
+            relayer_fee = EXCLUDED.relayer_fee,
+            params = EXCLUDED.params",
+    )
+    .bind(&row.id)
+    .bind(row.block_number.to_string())
+    .bind(&row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.chain_id.to_string())
+    .bind(&row.msg_hash)
+    .bind(&row.oracle)
+    .bind(&row.relayer)
+    .bind(row.oracle_fee.to_string())
+    .bind(row.relayer_fee.to_string())
+    .bind(&row.params)
+    .execute(&mut **tx)
+    .await
+    .context("upsert ormp_message_assigned row")?;
+
+    Ok(())
+}
+
+async fn backfill_message_assignment(
+    tx: &mut Transaction<'_, Postgres>,
+    row: &OrmpMessageAssignedRow,
+    assignment_config: &AssignmentConfig,
+) -> anyhow::Result<()> {
+    let oracle_match = contains_address(&assignment_config.oracle_addresses, &row.oracle);
+    let relayer_match = contains_address(&assignment_config.relayer_addresses, &row.relayer);
+
+    if !oracle_match && !relayer_match {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "UPDATE ormp_message_accepted
+         SET
+            oracle = CASE WHEN $2 THEN $3 ELSE oracle END,
+            oracle_assigned = CASE WHEN $2 THEN TRUE ELSE oracle_assigned END,
+            oracle_assigned_fee = CASE WHEN $2 THEN $4::NUMERIC ELSE oracle_assigned_fee END,
+            relayer = CASE WHEN $5 THEN $6 ELSE relayer END,
+            relayer_assigned = CASE WHEN $5 THEN TRUE ELSE relayer_assigned END,
+            relayer_assigned_fee = CASE WHEN $5 THEN $7::NUMERIC ELSE relayer_assigned_fee END
+         WHERE id = $1",
+    )
+    .bind(&row.msg_hash)
+    .bind(oracle_match)
+    .bind(&row.oracle)
+    .bind(row.oracle_fee.to_string())
+    .bind(relayer_match)
+    .bind(&row.relayer)
+    .bind(row.relayer_fee.to_string())
+    .execute(&mut **tx)
+    .await
+    .context("backfill ormp_message_accepted assignment fields")?;
+
+    Ok(())
+}
+
+async fn insert_message_dispatched(
+    tx: &mut Transaction<'_, Postgres>,
+    row: OrmpMessageDispatchedRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO ormp_message_dispatched (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            target_chain_id, msg_hash, dispatch_result
+         )
+         VALUES ($1, $2::NUMERIC, $3, $4::NUMERIC, $5::NUMERIC, $6::NUMERIC, $7, $8)
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            chain_id = EXCLUDED.chain_id,
+            target_chain_id = EXCLUDED.target_chain_id,
+            msg_hash = EXCLUDED.msg_hash,
+            dispatch_result = EXCLUDED.dispatch_result",
+    )
+    .bind(row.id)
+    .bind(row.block_number.to_string())
+    .bind(row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.chain_id.to_string())
+    .bind(row.target_chain_id.to_string())
+    .bind(row.msg_hash)
+    .bind(row.dispatch_result)
+    .execute(&mut **tx)
+    .await
+    .context("upsert ormp_message_dispatched row")?;
+
+    Ok(())
+}
+
+async fn insert_msgport_message_recv(
+    tx: &mut Transaction<'_, Postgres>,
+    row: MsgportMessageRecvRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO msgport_message_recv (
+            id, block_number, transaction_hash, block_timestamp, transaction_index,
+            log_index, chain_id, port_address, msg_id, result, return_data
+         )
+         VALUES ($1, $2::NUMERIC, $3, $4::NUMERIC, $5, $6, $7::NUMERIC, $8, $9, $10, $11)
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            transaction_index = EXCLUDED.transaction_index,
+            log_index = EXCLUDED.log_index,
+            chain_id = EXCLUDED.chain_id,
+            port_address = EXCLUDED.port_address,
+            msg_id = EXCLUDED.msg_id,
+            result = EXCLUDED.result,
+            return_data = EXCLUDED.return_data",
+    )
+    .bind(row.id)
+    .bind(row.block_number.to_string())
+    .bind(row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.transaction_index)
+    .bind(row.log_index)
+    .bind(row.chain_id.to_string())
+    .bind(row.port_address)
+    .bind(row.msg_id)
+    .bind(row.result)
+    .bind(row.return_data)
+    .execute(&mut **tx)
+    .await
+    .context("upsert msgport_message_recv row")?;
+
+    Ok(())
+}
+
+async fn insert_msgport_message_sent(
+    tx: &mut Transaction<'_, Postgres>,
+    row: MsgportMessageSentRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO msgport_message_sent (
+            id, block_number, transaction_hash, block_timestamp, transaction_index,
+            log_index, chain_id, port_address, transaction_from, from_chain_id,
+            msg_id, from_dapp, to_chain_id, to_dapp, message, params
+         )
+         VALUES (
+            $1, $2::NUMERIC, $3, $4::NUMERIC, $5,
+            $6, $7::NUMERIC, $8, $9, $10::NUMERIC,
+            $11, $12, $13::NUMERIC, $14, $15, $16
+         )
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            transaction_index = EXCLUDED.transaction_index,
+            log_index = EXCLUDED.log_index,
+            chain_id = EXCLUDED.chain_id,
+            port_address = EXCLUDED.port_address,
+            transaction_from = EXCLUDED.transaction_from,
+            from_chain_id = EXCLUDED.from_chain_id,
+            msg_id = EXCLUDED.msg_id,
+            from_dapp = EXCLUDED.from_dapp,
+            to_chain_id = EXCLUDED.to_chain_id,
+            to_dapp = EXCLUDED.to_dapp,
+            message = EXCLUDED.message,
+            params = EXCLUDED.params",
+    )
+    .bind(row.id)
+    .bind(row.block_number.to_string())
+    .bind(row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.transaction_index)
+    .bind(row.log_index)
+    .bind(row.chain_id.to_string())
+    .bind(row.port_address)
+    .bind(row.transaction_from)
+    .bind(row.from_chain_id.to_string())
+    .bind(row.msg_id)
+    .bind(row.from_dapp)
+    .bind(row.to_chain_id.to_string())
+    .bind(row.to_dapp)
+    .bind(row.message)
+    .bind(row.params)
+    .execute(&mut **tx)
+    .await
+    .context("upsert msgport_message_sent row")?;
+
+    Ok(())
+}
+
+async fn insert_signature_submittion(
+    tx: &mut Transaction<'_, Postgres>,
+    row: SignaturePubSignatureSubmittionRow,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO signature_pub_signature_submittion (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            channel, signer, msg_index, signature, data
+         )
+         VALUES ($1, $2::NUMERIC, $3, $4::NUMERIC, $5::NUMERIC, $6, $7, $8::NUMERIC, $9, $10)
+         ON CONFLICT (id) DO UPDATE SET
+            block_number = EXCLUDED.block_number,
+            transaction_hash = EXCLUDED.transaction_hash,
+            block_timestamp = EXCLUDED.block_timestamp,
+            chain_id = EXCLUDED.chain_id,
+            channel = EXCLUDED.channel,
+            signer = EXCLUDED.signer,
+            msg_index = EXCLUDED.msg_index,
+            signature = EXCLUDED.signature,
+            data = EXCLUDED.data",
+    )
+    .bind(row.id)
+    .bind(row.block_number.to_string())
+    .bind(row.transaction_hash)
+    .bind(row.block_timestamp.to_string())
+    .bind(row.chain_id.to_string())
+    .bind(row.channel)
+    .bind(row.signer)
+    .bind(row.msg_index.to_string())
+    .bind(row.signature)
+    .bind(row.data)
+    .execute(&mut **tx)
+    .await
+    .context("upsert signature_pub_signature_submittion row")?;
+
+    Ok(())
+}
+
+fn contains_address(addresses: &[String], candidate: &str) -> bool {
+    addresses
+        .iter()
+        .any(|address| address.eq_ignore_ascii_case(candidate))
 }
