@@ -1,10 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
-mod config;
-mod runtime;
-
-use runtime::{migrate, run};
+use ormpindexer::runtime::{migrate, run};
 
 #[derive(Debug, Parser)]
 #[command(name = "ormpindexer")]
@@ -15,7 +12,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Run,
+    Run {
+        #[arg(long)]
+        once: bool,
+    },
     Migrate,
 }
 
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run => run().await,
+        Command::Run { once } => run(once).await,
         Command::Migrate => migrate().await,
     }
 }

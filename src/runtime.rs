@@ -1,28 +1,57 @@
-use crate::config::RuntimeConfig;
-use ormpindexer::schema::POSTGRES_SCHEMA_MIGRATION;
+use anyhow::Context;
 
-pub async fn run() -> anyhow::Result<()> {
-    let config = RuntimeConfig::from_env();
+use crate::{
+    config::RuntimeConfig,
+    database::{DryRunEventWriter, PostgresCheckpointStore, apply_migrations, connect},
+    datalens::DatalensHttpClient,
+    decoder::NoopDecoder,
+    runner::IndexerRunner,
+};
+
+pub async fn run(run_once: bool) -> anyhow::Result<()> {
+    let config = RuntimeConfig::from_env().context("load ORMP indexer runtime config")?;
+    let database_url = config
+        .database_url
+        .as_ref()
+        .context("ORMPINDEXER_DATABASE_URL must be configured for run")?;
+    let pool = connect(database_url, 5).await?;
+    apply_migrations(&pool).await?;
 
     log::info!(
-        "starting ORMP indexer datalens_endpoint={} datalens_application={} token_configured={} database_configured={}",
-        config.datalens_endpoint,
-        config.datalens_application,
-        config.datalens_token.is_some(),
-        config.database_url.is_some(),
+        "starting ORMP Datalens indexer endpoint={} application={} token_configured={} database_configured=true chains={} batch_size={} dataset={} finality={} dry_run=true",
+        config.datalens.endpoint,
+        config.datalens.application,
+        config.datalens.token.is_some(),
+        config.enabled_chains.len(),
+        config.batch_size,
+        config.dataset,
+        config.finality_mode.as_str(),
     );
+
+    let runner = IndexerRunner::new(
+        config.clone(),
+        DatalensHttpClient::new(config.datalens.clone()),
+        PostgresCheckpointStore::new(pool),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    if run_once {
+        runner.run_once().await?;
+    } else {
+        runner.run_loop().await?;
+    }
 
     Ok(())
 }
 
 pub async fn migrate() -> anyhow::Result<()> {
-    let config = RuntimeConfig::from_env();
+    let database_url =
+        RuntimeConfig::database_url_from_env().context("load ORMP indexer database config")?;
+    let pool = connect(&database_url, 1).await?;
+    apply_migrations(&pool).await?;
 
-    log::info!(
-        "ORMP indexer schema compatibility migration is defined bytes={} database_configured={}",
-        POSTGRES_SCHEMA_MIGRATION.len(),
-        config.database_url.is_some(),
-    );
+    log::info!("ORMP indexer migrations applied");
 
     Ok(())
 }
