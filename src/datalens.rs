@@ -74,31 +74,37 @@ impl DatalensLogReader for DatalensHttpClient {
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
         let request = json!({
             "query": r#"
-                query OrmpIndexerLogs($input: EvmLogsInput!) {
-                  evmLogs(input: $input) {
-                    id
-                    chainId
-                    blockNumber
-                    blockTimestamp
-                    transactionHash
-                    transactionIndex
-                    logIndex
-                    address
-                    transactionFrom
-                    topics
-                    data
+                query OrmpIndexerLogs($input: QueryInput!) {
+                  query(input: $input) {
+                    rows
                   }
                 }
             "#,
             "variables": {
                 "input": {
-                    "application": self.config.application,
-                    "chainId": query.chain_id,
-                    "fromBlock": query.from_block,
-                    "toBlock": query.to_block,
-                    "addresses": query.contracts,
-                    "topics": query.topics,
-                    "finality": query.finality_mode.as_str(),
+                    "chain": {
+                        "family": { "kind": "evm" },
+                        "configuredName": evm_chain_name(query.chain_id),
+                        "networkId": { "numeric": query.chain_id },
+                    },
+                    "datasetKey": {
+                        "family": "evm",
+                        "name": "logs",
+                    },
+                    "selector": {
+                        "kind": "evm_logs",
+                        "evmLogs": {
+                            "addresses": query.contracts,
+                            "topics": topic_filters(&query.topics),
+                        },
+                    },
+                    "range": {
+                        "kind": "block",
+                        "start": query.from_block,
+                        "end": query.to_block,
+                    },
+                    "finality": native_finality(query.finality_mode),
+                    "fields": {},
                 }
             }
         });
@@ -116,12 +122,109 @@ impl DatalensLogReader for DatalensHttpClient {
             anyhow::bail!("Datalens log query returned errors: {errors}");
         }
 
-        let logs = serde_json::from_value(
-            payload
-                .pointer("/data/evmLogs")
-                .cloned()
-                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
-        )?;
+        let logs = logs_from_native_query_payload(&payload, query.chain_id)?;
         Ok(DatalensLogQueryResult { logs })
+    }
+}
+
+pub fn logs_from_native_query_payload(
+    payload: &serde_json::Value,
+    chain_id: u64,
+) -> anyhow::Result<Vec<DatalensLog>> {
+    let rows = payload
+        .pointer("/data/query/rows")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let logs = native_log_rows(&rows)?;
+    logs.into_iter()
+        .map(|row| row.into_datalens_log(chain_id))
+        .collect()
+}
+
+fn native_log_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<NativeLogRow>> {
+    if rows.is_array() {
+        return Ok(serde_json::from_value(rows.clone())?);
+    }
+
+    if let Some(value) = rows.pointer("/rows/rows") {
+        return Ok(serde_json::from_value(value.clone())?);
+    }
+
+    if let Some(value) = rows.pointer("/rows") {
+        return Ok(serde_json::from_value(value.clone())?);
+    }
+
+    anyhow::bail!("Datalens native query response missing evm log rows")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+struct NativeLogRow {
+    #[serde(default)]
+    id: Option<String>,
+    block_number: u64,
+    #[serde(default)]
+    block_timestamp: Option<u64>,
+    transaction_hash: String,
+    transaction_index: i32,
+    log_index: u64,
+    address: String,
+    #[serde(default)]
+    transaction_from: Option<String>,
+    topics: Vec<String>,
+    data: String,
+}
+
+impl NativeLogRow {
+    fn into_datalens_log(self, chain_id: u64) -> anyhow::Result<DatalensLog> {
+        let id = self.id.unwrap_or_else(|| {
+            format!(
+                "{}-{}-{}-{}",
+                chain_id, self.block_number, self.transaction_hash, self.log_index
+            )
+        });
+
+        Ok(DatalensLog {
+            id: Some(id),
+            chain_id,
+            block_number: self.block_number,
+            block_timestamp: self.block_timestamp,
+            transaction_hash: self.transaction_hash,
+            transaction_index: Some(self.transaction_index),
+            log_index: self.log_index,
+            address: self.address,
+            transaction_from: self.transaction_from,
+            topics: self.topics,
+            data: self.data,
+        })
+    }
+}
+
+fn topic_filters(topics: &[String]) -> Vec<Vec<String>> {
+    if topics.is_empty() {
+        Vec::new()
+    } else {
+        vec![topics.to_vec()]
+    }
+}
+
+fn native_finality(finality_mode: FinalityMode) -> &'static str {
+    match finality_mode {
+        FinalityMode::Finalized => "finalized",
+        FinalityMode::Durable => "durable_only",
+    }
+}
+
+fn evm_chain_name(chain_id: u64) -> &'static str {
+    match chain_id {
+        1 => "ethereum",
+        44 => "crab",
+        46 => "darwinia",
+        137 => "polygon",
+        1284 => "moonbeam",
+        8453 => "base",
+        42161 => "arbitrum",
+        81457 => "blast",
+        2818 => "morph",
+        _ => "ethereum",
     }
 }
