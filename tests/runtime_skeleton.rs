@@ -124,11 +124,15 @@ async fn test_runner_dry_run_queries_datalens_and_leaves_checkpoint_unchanged() 
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
     let reader = RecordingDatalensReader::new(vec![DatalensLog {
+        id: Some("46-0xtx-1".to_owned()),
         chain_id: 46,
         block_number: 12,
+        block_timestamp: Some(1_700_000_000_000),
         transaction_hash: "0xtx".to_owned(),
+        transaction_index: Some(0),
         log_index: 1,
         address: "0x333".to_owned(),
+        transaction_from: None,
         topics: vec!["0xaaa".to_owned()],
         data: "0x".to_owned(),
     }]);
