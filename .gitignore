@@ -1,11 +1,5 @@
-node_modules
-lib
-builds
+/target
 
-/**Versions.json
-
-.idea
+# Local environment overrides
 .env
-.ponder
-
 *.local.*
