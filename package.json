@@ -7,6 +7,7 @@
     "codegen:schema": "npx sqd codegen",
     "codegen": "npm run codegen:abi && npm run codegen:schema",
     "migrate:db": "zx scripts/sqd-migration.mjs",
+    "postinstall": "node scripts/patch-subsquid-evm-processor.js",
     "build": "rm -rf lib && tsc"
   },
   "dependencies": {
