@@ -11,7 +11,7 @@ use ormpindexer::{
         ORMP_MESSAGE_DISPATCHED_TOPIC, SIGNATURE_PUB_ADDRESS,
         SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
     },
-    schema::{EventSource, LegacyOrmPEvent},
+    schema::{EventSource, LegacyOrmPEvent, MsgportMessageSentRow},
 };
 
 #[test]
@@ -194,6 +194,51 @@ fn test_decode_msgport_and_signature_events_preserves_legacy_fields() {
             data: "0xbeef".to_owned(),
         }
     );
+}
+
+#[test]
+fn test_decode_native_graphql_log_preserves_metadata_in_legacy_row() {
+    let log: DatalensLog = serde_json::from_value(serde_json::json!({
+        "id": "46-888-7",
+        "chainId": 46,
+        "blockNumber": 888,
+        "blockTimestamp": 1_800_000_000_000_u64,
+        "transactionHash": bytes_hex(0xaa).to_ascii_uppercase(),
+        "transactionIndex": 9,
+        "logIndex": 7,
+        "address": MSGPORT_ADDRESS.to_ascii_uppercase(),
+        "transactionFrom": address_hex(0x51).to_ascii_uppercase(),
+        "topics": [MSGPORT_MESSAGE_SENT_TOPIC],
+        "data": format!(
+            "0x{}",
+            hex::encode(encode(&[
+                Token::FixedBytes(bytes32(0x33)),
+                Token::Address(address(0x30)),
+                Token::Uint(U256::from(42161)),
+                Token::Address(address(0x31)),
+                Token::Bytes(vec![0xaa]),
+                Token::Bytes(vec![0xbb, 0xcc]),
+            ]))
+        )
+    }))
+    .expect("decode native GraphQL log");
+
+    let row = MsgportMessageSentRow::from_event(decode_evm_log(&log).expect("decode EVM event"));
+
+    assert_eq!(row.id, "46-888-7");
+    assert_eq!(row.chain_id, 46);
+    assert_eq!(row.block_number, 888);
+    assert_eq!(row.block_timestamp, 1_800_000_000_000);
+    assert_eq!(row.transaction_hash, bytes_hex(0xaa));
+    assert_eq!(row.transaction_index, 9);
+    assert_eq!(row.log_index, 7);
+    assert_eq!(row.port_address, MSGPORT_ADDRESS.to_ascii_lowercase());
+    assert_eq!(
+        row.transaction_from.as_deref(),
+        Some(address_hex(0x51).as_str())
+    );
+    assert_eq!(row.from_chain_id, 46);
+    assert_eq!(row.msg_id, bytes_hex(0x33));
 }
 
 #[test]
