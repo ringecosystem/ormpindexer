@@ -112,6 +112,7 @@ impl DatalensLogReader for DatalensHttpClient {
         let mut builder = self
             .http
             .post(self.native_graphql_endpoint())
+            .header("x-datalens-application", &self.config.application)
             .json(&request);
         if let Some(token) = &self.config.token {
             builder = builder.bearer_auth(token.expose_secret());
