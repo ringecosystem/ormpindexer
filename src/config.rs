@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, env, fmt, time::Duration};
 
 use anyhow::{Context, bail};
 
+use crate::planner::default_evm_chain_config;
+
 pub const DEFAULT_DATASET: &str = "datalens-native";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,7 +38,7 @@ impl RuntimeConfig {
     }
 
     pub fn from_env_map(env: &BTreeMap<String, String>) -> anyhow::Result<Self> {
-        let start_block = optional_u64(env, "ORMPINDEXER_START_BLOCK")?.unwrap_or(0);
+        let start_block = optional_u64(env, "ORMPINDEXER_START_BLOCK")?;
         let chain_ids = required_list(env, "ORMPINDEXER_ENABLED_CHAINS")?
             .into_iter()
             .map(|value| {
@@ -62,7 +64,7 @@ impl RuntimeConfig {
             database_url: optional_env(env, "ORMPINDEXER_DATABASE_URL").map(SecretString::new),
             enabled_chains,
             batch_size: optional_u64(env, "ORMPINDEXER_BATCH_SIZE")?.unwrap_or(1_000),
-            start_block,
+            start_block: start_block.unwrap_or(0),
             finality_mode: optional_env(env, "ORMPINDEXER_FINALITY_MODE")
                 .as_deref()
                 .map(str::parse)
@@ -102,19 +104,29 @@ impl ChainConfig {
     fn from_env_map(
         env: &BTreeMap<String, String>,
         chain_id: u64,
-        default_start_block: u64,
+        default_start_block: Option<u64>,
     ) -> anyhow::Result<Self> {
         let prefix = format!("ORMPINDEXER_CHAIN_{chain_id}");
-        let contracts = required_list(env, &format!("{prefix}_CONTRACTS"))?;
+        let default = default_evm_chain_config(chain_id)?;
+        let contracts = optional_list(env, &format!("{prefix}_CONTRACTS"));
         let topics = optional_list(env, &format!("{prefix}_TOPICS"));
-        let start_block =
-            optional_u64(env, &format!("{prefix}_START_BLOCK"))?.unwrap_or(default_start_block);
+        let start_block = optional_u64(env, &format!("{prefix}_START_BLOCK"))?
+            .or(default_start_block)
+            .unwrap_or(default.start_block);
 
         Ok(Self {
             chain_id,
             start_block,
-            contracts,
-            topics,
+            contracts: if contracts.is_empty() {
+                default.contracts
+            } else {
+                contracts
+            },
+            topics: if topics.is_empty() {
+                default.topics
+            } else {
+                topics
+            },
         })
     }
 }
