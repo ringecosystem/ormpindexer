@@ -156,6 +156,25 @@ fn test_runtime_config_requires_tron_start_block() {
 }
 
 #[test]
+fn test_runtime_config_does_not_use_global_start_block_for_tron() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
+            TRON_CHAIN_ID.to_string(),
+        ),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("global start block is ignored");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_CHAIN_728126428_START_BLOCK must be configured for Tron")
+    );
+}
+
+#[test]
 fn test_unknown_chain_returns_clear_error() {
     let error = default_evm_chain_config(999_999).expect_err("unknown chain");
 

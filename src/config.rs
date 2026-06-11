@@ -110,12 +110,15 @@ impl ChainConfig {
         let default = default_chain_config(chain_id)?;
         let contracts = optional_list(env, &format!("{prefix}_CONTRACTS"));
         let topics = optional_list(env, &format!("{prefix}_TOPICS"));
-        let start_block = optional_u64(env, &format!("{prefix}_START_BLOCK"))?
-            .or(default_start_block)
-            .unwrap_or(default.start_block);
-        if chain_id == TRON_CHAIN_ID && start_block == 0 {
-            bail!("{prefix}_START_BLOCK must be configured for Tron");
-        }
+        let chain_start_block = optional_u64(env, &format!("{prefix}_START_BLOCK"))?;
+        let start_block = if chain_id == TRON_CHAIN_ID {
+            chain_start_block
+                .with_context(|| format!("{prefix}_START_BLOCK must be configured for Tron"))?
+        } else {
+            chain_start_block
+                .or(default_start_block)
+                .unwrap_or(default.start_block)
+        };
 
         Ok(Self {
             chain_id,
