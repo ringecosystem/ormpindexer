@@ -1,4 +1,5 @@
 use crate::config::RuntimeConfig;
+use ormpindexer::schema::POSTGRES_SCHEMA_MIGRATION;
 
 pub async fn run() -> anyhow::Result<()> {
     let config = RuntimeConfig::from_env();
@@ -18,7 +19,8 @@ pub async fn migrate() -> anyhow::Result<()> {
     let config = RuntimeConfig::from_env();
 
     log::info!(
-        "no ORMP indexer migrations are defined yet database_configured={}",
+        "ORMP indexer schema compatibility migration is defined bytes={} database_configured={}",
+        POSTGRES_SCHEMA_MIGRATION.len(),
         config.database_url.is_some(),
     );
 
