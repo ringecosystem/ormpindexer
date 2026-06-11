@@ -4,7 +4,9 @@ use ormpindexer::{
     config::{FinalityMode, RuntimeConfig},
     planner::{
         PRODUCTION_EVM_CHAIN_IDS, SIGNATURE_PUB_ADDRESS, SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
-        default_evm_chain_config, plan_evm_log_queries,
+        TRON_CHAIN_ID, TRON_MESSAGE_ACCEPTED_EVENT, TRON_MESSAGE_DISPATCHED_EVENT,
+        default_chain_config, default_evm_chain_config, default_tron_chain_config,
+        plan_evm_log_queries, plan_tron_event_queries,
     },
 };
 
@@ -88,6 +90,57 @@ fn test_plan_evm_log_queries_splits_ranges_by_limit() {
 }
 
 #[test]
+fn test_tron_chain_default_config_and_query_plans_are_available() {
+    let chain = default_tron_chain_config().expect("tron mainnet");
+    let plans = plan_tron_event_queries(
+        "datalens-native",
+        &chain,
+        chain.start_block,
+        chain.start_block + 9,
+        100,
+        FinalityMode::Finalized,
+    )
+    .expect("tron query plans");
+
+    assert_eq!(chain.chain_id, TRON_CHAIN_ID);
+    assert!(!chain.contracts.is_empty());
+    assert!(
+        chain
+            .topics
+            .contains(&TRON_MESSAGE_ACCEPTED_EVENT.to_owned())
+    );
+    assert!(
+        chain
+            .topics
+            .contains(&TRON_MESSAGE_DISPATCHED_EVENT.to_owned())
+    );
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].dataset, "datalens-native");
+    assert_eq!(plans[0].query.chain_id, TRON_CHAIN_ID);
+    assert_eq!(plans[0].query.from_block, chain.start_block);
+    assert_eq!(plans[0].query.to_block, chain.start_block + 9);
+    assert_eq!(plans[0].query.contracts, chain.contracts);
+    assert_eq!(plans[0].query.topics, chain.topics);
+}
+
+#[test]
+fn test_runtime_config_accepts_tron_chain_defaults() {
+    let env = BTreeMap::from([(
+        "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
+        TRON_CHAIN_ID.to_string(),
+    )]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let tron = config.chain(TRON_CHAIN_ID).expect("tron chain");
+
+    assert_eq!(tron.chain_id, TRON_CHAIN_ID);
+    assert!(!tron.contracts.is_empty());
+    assert!(
+        tron.topics
+            .contains(&TRON_MESSAGE_ACCEPTED_EVENT.to_owned())
+    );
+}
+
+#[test]
 fn test_unknown_chain_returns_clear_error() {
     let error = default_evm_chain_config(999_999).expect_err("unknown chain");
 
@@ -96,6 +149,13 @@ fn test_unknown_chain_returns_clear_error() {
             .to_string()
             .contains("unconfigured ORMP EVM chain 999999")
     );
+}
+
+#[test]
+fn test_default_chain_config_rejects_unknown_chain() {
+    let error = default_chain_config(999_999).expect_err("unknown chain");
+
+    assert!(error.to_string().contains("unconfigured ORMP chain 999999"));
 }
 
 #[test]

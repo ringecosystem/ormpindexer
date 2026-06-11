@@ -1,4 +1,10 @@
-use ormpindexer::datalens::{DatalensLog, evm_chain_name, logs_from_native_query_payload};
+use ormpindexer::{
+    datalens::{
+        DatalensLog, evm_chain_name, logs_from_native_query_payload, native_graphql_request,
+        tron_chain_name,
+    },
+    planner::TRON_CHAIN_ID,
+};
 
 #[test]
 fn test_datalens_log_decodes_native_graphql_camel_case_response() {
@@ -107,7 +113,127 @@ fn test_native_query_rows_decode_with_context_metadata() {
 }
 
 #[test]
+fn test_tron_native_query_rows_decode_with_context_metadata() {
+    let logs = logs_from_native_query_payload(
+        &serde_json::json!({
+            "data": {
+                "query": {
+                    "rows": {
+                        "dataset_key": { "family": { "kind": "tron" }, "name": "events" },
+                        "rows": {
+                            "dataset": "events",
+                            "rows": [{
+                                "contract_address": "41ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+                                "event_name": "MessageSent",
+                                "event_signature": "MessageSent(bytes32,address,uint256,address,bytes,bytes)",
+                                "indexed_fields": [],
+                                "non_indexed_fields": {
+                                    "msgId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                                    "fromDapp": "0x0000000000000000000000000000000000000030",
+                                    "toChainId": "42161",
+                                    "toDapp": "0x0000000000000000000000000000000000000031",
+                                    "message": "0xaa",
+                                    "params": "0xbbcc"
+                                },
+                                "transaction_id": "trontx",
+                                "block_number": 123,
+                                "block_hash": "0xblock",
+                                "parent_hash": "0xparent",
+                                "block_timestamp": 456,
+                                "transaction_index": 2,
+                                "event_index": 3,
+                                "confirmed": true,
+                                "source": { "provider": "trongrid_contract_events" }
+                            }]
+                        }
+                    }
+                }
+            }
+        }),
+        TRON_CHAIN_ID,
+    )
+    .expect("decode native Tron query rows");
+
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].id.as_deref(), Some("728126428-123-trontx-3"));
+    assert_eq!(logs[0].chain_id, TRON_CHAIN_ID);
+    assert_eq!(logs[0].block_number, 123);
+    assert_eq!(logs[0].block_timestamp, Some(456));
+    assert_eq!(logs[0].transaction_hash, "trontx");
+    assert_eq!(logs[0].transaction_index, Some(2));
+    assert_eq!(logs[0].log_index, 3);
+    assert_eq!(
+        logs[0].address,
+        "41ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"
+    );
+    assert_eq!(logs[0].transaction_from, None);
+    assert_eq!(logs[0].event_name.as_deref(), Some("MessageSent"));
+    assert_eq!(
+        logs[0].event_signature.as_deref(),
+        Some("MessageSent(bytes32,address,uint256,address,bytes,bytes)")
+    );
+    assert_eq!(
+        logs[0].non_indexed_fields.as_ref().expect("decoded args")["toChainId"],
+        "42161"
+    );
+}
+
+#[test]
+fn test_tron_native_graphql_request_uses_other_selector_shape() {
+    let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
+        chain_id: TRON_CHAIN_ID,
+        from_block: 100,
+        to_block: 110,
+        contracts: vec!["0x0000000000000000000000000000000000000000".to_owned()],
+        topics: vec!["MessageDispatched".to_owned(), "MessageAccepted".to_owned()],
+        finality_mode: ormpindexer::config::FinalityMode::Durable,
+    })
+    .expect("build Tron request");
+    let input = &request["variables"]["input"];
+
+    assert_eq!(
+        input["chain"]["family"],
+        serde_json::json!({"kind": "other", "other": "tron"})
+    );
+    assert_eq!(input["chain"]["configuredName"], "tron-mainnet");
+    assert_eq!(
+        input["chain"]["networkId"],
+        serde_json::json!({"numeric": TRON_CHAIN_ID})
+    );
+    assert_eq!(
+        input["datasetKey"],
+        serde_json::json!({"family": "tron", "name": "events"})
+    );
+    assert_eq!(input["selector"]["kind"], "other");
+    assert_eq!(input["selector"]["other"]["kind"], "tron_events");
+    assert_eq!(
+        input["selector"]["other"]["canonicalKey"],
+        "contracts/410000000000000000000000000000000000000000/events/MessageAccepted+MessageDispatched"
+    );
+    assert!(
+        input["selector"]["other"]["fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .starts_with("tron-events/")
+    );
+    assert_eq!(
+        input["range"],
+        serde_json::json!({"kind": "block", "start": 100, "end": 110})
+    );
+    assert_eq!(input["finality"], "durable_only");
+}
+
+#[test]
 fn test_evm_chain_name_rejects_unknown_chain_ids() {
     assert_eq!(evm_chain_name(46).expect("darwinia chain name"), "darwinia");
     assert!(evm_chain_name(99_999).is_err());
+}
+
+#[test]
+fn test_tron_chain_name_rejects_unknown_chain_ids() {
+    assert_eq!(
+        tron_chain_name(TRON_CHAIN_ID).expect("tron mainnet"),
+        "tron-mainnet"
+    );
+    assert!(tron_chain_name(46).is_err());
 }

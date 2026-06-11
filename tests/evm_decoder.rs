@@ -302,6 +302,10 @@ fn log(topic: &str, address: &str, data: Vec<u8>) -> DatalensLog {
         transaction_from: Some(address_hex(0x50)),
         topics: vec![topic.to_owned()],
         data: format!("0x{}", hex::encode(data)),
+        event_name: None,
+        event_signature: None,
+        indexed_fields: Vec::new(),
+        non_indexed_fields: None,
     }
 }
 

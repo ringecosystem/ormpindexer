@@ -136,6 +136,10 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
         transaction_from: None,
         topics: vec!["0xaaa".to_owned()],
         data: "0x".to_owned(),
+        event_name: None,
+        event_signature: None,
+        indexed_fields: Vec::new(),
+        non_indexed_fields: None,
     }]);
     let runner = IndexerRunner::new(
         config,
