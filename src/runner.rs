@@ -8,6 +8,7 @@ use crate::{
     database::EventWriter,
     datalens::{DatalensLogQuery, DatalensLogReader},
     decoder::EventDecoder,
+    planner::chain_dataset,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -58,16 +59,17 @@ where
         let mut report = RunnerReport::default();
 
         for chain in &self.config.enabled_chains {
+            let dataset = chain_dataset(chain.chain_id)?;
             let checkpoint = self
                 .checkpoints
-                .read_or_create(chain.chain_id, &self.config.dataset, chain.start_block)
+                .read_or_create(chain.chain_id, dataset, chain.start_block)
                 .await?;
             let range = plan_next_range(&checkpoint, self.config.batch_size)?;
 
             log::info!(
                 "querying ORMP Datalens logs chain_id={} dataset={} from_block={} to_block={} batch_size={} contracts={} topics={} finality={}",
                 chain.chain_id,
-                self.config.dataset,
+                dataset,
                 range.from_block,
                 range.to_block,
                 self.config.batch_size,
@@ -97,13 +99,13 @@ where
                 .checked_add(1)
                 .context("checkpoint next block overflow")?;
             self.checkpoints
-                .advance(chain.chain_id, &self.config.dataset, next_block)
+                .advance(chain.chain_id, dataset, next_block)
                 .await?;
 
             log::info!(
                 "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true",
                 chain.chain_id,
-                self.config.dataset,
+                dataset,
                 range.from_block,
                 range.to_block,
                 result.logs.len(),

@@ -15,7 +15,7 @@ fn test_production_evm_chains_produce_default_query_plans() {
     for chain_id in PRODUCTION_EVM_CHAIN_IDS {
         let chain = default_evm_chain_config(*chain_id).expect("configured production chain");
         let plans = plan_evm_log_queries(
-            "datalens-native",
+            "evm.logs",
             &chain,
             chain.start_block,
             chain.start_block + 9,
@@ -25,7 +25,7 @@ fn test_production_evm_chains_produce_default_query_plans() {
         .expect("query plans");
 
         assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].dataset, "datalens-native");
+        assert_eq!(plans[0].dataset, "evm.logs");
         assert_eq!(plans[0].query.chain_id, *chain_id);
         assert_eq!(plans[0].query.from_block, chain.start_block);
         assert_eq!(plans[0].query.to_block, chain.start_block + 9);
@@ -66,15 +66,8 @@ fn test_darwinia_includes_signature_pub_but_other_defaults_do_not() {
 #[test]
 fn test_plan_evm_log_queries_splits_ranges_by_limit() {
     let chain = default_evm_chain_config(46).expect("darwinia");
-    let plans = plan_evm_log_queries(
-        "datalens-native",
-        &chain,
-        100,
-        220,
-        50,
-        FinalityMode::Durable,
-    )
-    .expect("split plans");
+    let plans = plan_evm_log_queries("ignored", &chain, 100, 220, 50, FinalityMode::Durable)
+        .expect("split plans");
     let ranges = plans
         .iter()
         .map(|plan| (plan.query.from_block, plan.query.to_block))
@@ -93,7 +86,7 @@ fn test_plan_evm_log_queries_splits_ranges_by_limit() {
 fn test_tron_chain_default_config_and_query_plans_are_available() {
     let chain = default_tron_chain_config().expect("tron mainnet");
     let plans = plan_tron_event_queries(
-        "datalens-native",
+        "ignored",
         &chain,
         chain.start_block,
         chain.start_block + 9,
@@ -115,7 +108,7 @@ fn test_tron_chain_default_config_and_query_plans_are_available() {
             .contains(&TRON_MESSAGE_DISPATCHED_EVENT.to_owned())
     );
     assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].dataset, "datalens-native");
+    assert_eq!(plans[0].dataset, "tron.events");
     assert_eq!(plans[0].query.chain_id, TRON_CHAIN_ID);
     assert_eq!(plans[0].query.from_block, chain.start_block);
     assert_eq!(plans[0].query.to_block, chain.start_block + 9);
@@ -125,10 +118,16 @@ fn test_tron_chain_default_config_and_query_plans_are_available() {
 
 #[test]
 fn test_runtime_config_accepts_tron_chain_defaults() {
-    let env = BTreeMap::from([(
-        "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
-        TRON_CHAIN_ID.to_string(),
-    )]);
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
+            TRON_CHAIN_ID.to_string(),
+        ),
+        (
+            format!("ORMPINDEXER_CHAIN_{TRON_CHAIN_ID}_START_BLOCK"),
+            "83200000".to_owned(),
+        ),
+    ]);
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let tron = config.chain(TRON_CHAIN_ID).expect("tron chain");
 
@@ -137,6 +136,22 @@ fn test_runtime_config_accepts_tron_chain_defaults() {
     assert!(
         tron.topics
             .contains(&TRON_MESSAGE_ACCEPTED_EVENT.to_owned())
+    );
+}
+
+#[test]
+fn test_runtime_config_requires_tron_start_block() {
+    let env = BTreeMap::from([(
+        "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
+        TRON_CHAIN_ID.to_string(),
+    )]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("missing Tron start block fails");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_CHAIN_728126428_START_BLOCK must be configured for Tron")
     );
 }
 

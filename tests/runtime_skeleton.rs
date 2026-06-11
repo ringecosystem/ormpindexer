@@ -162,10 +162,7 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
             checkpoints_advanced: 1,
         }
     );
-    assert_eq!(
-        checkpoints.next_block(46, "datalens-native").await.unwrap(),
-        15
-    );
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
 }
 
 #[tokio::test]
@@ -196,10 +193,7 @@ async fn test_runner_empty_logs_still_advance_after_successful_query_and_write()
     let report = runner.run_once().await.expect("empty batch succeeds");
 
     assert_eq!(report.checkpoints_advanced, 1);
-    assert_eq!(
-        checkpoints.next_block(46, "datalens-native").await.unwrap(),
-        15
-    );
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
 }
 
 #[tokio::test]
@@ -233,10 +227,7 @@ async fn test_runner_writer_failure_does_not_advance_checkpoint() {
         .expect_err("writer failure fails the batch");
 
     assert!(error.to_string().contains("write failed"));
-    assert_eq!(
-        checkpoints.next_block(46, "datalens-native").await.unwrap(),
-        10
-    );
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);
 }
 
 #[tokio::test]
@@ -281,14 +272,8 @@ async fn test_runner_reports_and_advances_multiple_chains() {
             checkpoints_advanced: 2,
         }
     );
-    assert_eq!(
-        checkpoints.next_block(1, "datalens-native").await.unwrap(),
-        15
-    );
-    assert_eq!(
-        checkpoints.next_block(46, "datalens-native").await.unwrap(),
-        25
-    );
+    assert_eq!(checkpoints.next_block(1, "evm.logs").await.unwrap(), 15);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
 }
 
 struct RecordingDatalensReader {

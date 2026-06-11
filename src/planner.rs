@@ -25,7 +25,9 @@ pub const SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC: &str =
     "0x8b3975e4768e70d323e926e2cef0676fc9a3250437d9b8f90b52c770f0d7545f";
 
 pub const PRODUCTION_EVM_CHAIN_IDS: &[u64] = &[1, 46, 137, 42161];
+pub const EVM_LOGS_DATASET: &str = "evm.logs";
 pub const TRON_CHAIN_ID: u64 = 728_126_428;
+pub const TRON_EVENTS_DATASET: &str = "tron.events";
 
 pub const TRON_MSGPORT_ADDRESS: &str = "0x2cd1867Fb8016f93710B6386f7f9F1D540A60812";
 pub const TRON_ORMP_ADDRESS: &str = "0x13b2211a7cA45Db2808F6dB05557ce5347e3634e";
@@ -146,8 +148,17 @@ pub fn default_tron_chain_config() -> anyhow::Result<ChainConfig> {
     })
 }
 
+pub fn chain_dataset(chain_id: u64) -> anyhow::Result<&'static str> {
+    if chain_id == TRON_CHAIN_ID {
+        return Ok(TRON_EVENTS_DATASET);
+    }
+
+    default_evm_chain_config(chain_id)?;
+    Ok(EVM_LOGS_DATASET)
+}
+
 pub fn plan_evm_log_queries(
-    dataset: &str,
+    _dataset: &str,
     chain: &ChainConfig,
     from_block: u64,
     to_block: u64,
@@ -177,7 +188,7 @@ pub fn plan_evm_log_queries(
     while next_from <= to_block {
         let range_end = next_from.saturating_add(max_range_len - 1).min(to_block);
         plans.push(PlannedDatalensLogQuery {
-            dataset: dataset.to_owned(),
+            dataset: EVM_LOGS_DATASET.to_owned(),
             query: DatalensLogQuery {
                 chain_id: chain.chain_id,
                 from_block: next_from,
@@ -198,7 +209,7 @@ pub fn plan_evm_log_queries(
 }
 
 pub fn plan_tron_event_queries(
-    dataset: &str,
+    _dataset: &str,
     chain: &ChainConfig,
     from_block: u64,
     to_block: u64,
@@ -224,7 +235,7 @@ pub fn plan_tron_event_queries(
     while next_from <= to_block {
         let range_end = next_from.saturating_add(max_range_len - 1).min(to_block);
         plans.push(PlannedDatalensLogQuery {
-            dataset: dataset.to_owned(),
+            dataset: TRON_EVENTS_DATASET.to_owned(),
             query: DatalensLogQuery {
                 chain_id: chain.chain_id,
                 from_block: next_from,

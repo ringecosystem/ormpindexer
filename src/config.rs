@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, env, fmt, time::Duration};
 
 use anyhow::{Context, bail};
 
-use crate::planner::default_chain_config;
+use crate::planner::{TRON_CHAIN_ID, default_chain_config};
 
 pub const DEFAULT_DATASET: &str = "datalens-native";
 
@@ -113,6 +113,9 @@ impl ChainConfig {
         let start_block = optional_u64(env, &format!("{prefix}_START_BLOCK"))?
             .or(default_start_block)
             .unwrap_or(default.start_block);
+        if chain_id == TRON_CHAIN_ID && start_block == 0 {
+            bail!("{prefix}_START_BLOCK must be configured for Tron");
+        }
 
         Ok(Self {
             chain_id,

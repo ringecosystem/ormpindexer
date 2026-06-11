@@ -384,17 +384,21 @@ fn tron_event_selector(
 fn normalize_tron_contract_address(address: &str) -> anyhow::Result<String> {
     let address = address.trim();
     let hex = address.strip_prefix("0x").unwrap_or(address);
-    let normalized = match hex.len() {
-        40 if hex.bytes().all(|byte| byte.is_ascii_hexdigit()) => format!("41{hex}"),
-        42 if hex.starts_with("41") && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
-            hex.to_owned()
-        }
-        _ => address.to_owned(),
-    };
-    if normalized.is_empty() || normalized.contains('/') || normalized.contains('\\') {
-        anyhow::bail!("Tron contract address must be a non-empty address");
+    if hex.len() == 40 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(format!("41{}", hex.to_ascii_lowercase()));
     }
-    Ok(normalized.to_ascii_lowercase())
+    if hex.len() == 42 && hex.starts_with("41") && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Ok(hex.to_ascii_lowercase());
+    }
+    if address.len() == 34
+        && address.starts_with('T')
+        && address.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Ok(address.to_owned());
+    }
+
+    anyhow::bail!("Tron contract address must be hex, 41-prefixed hex, or base58")
 }
 
 fn normalize_tron_event_name(name: &str) -> anyhow::Result<String> {

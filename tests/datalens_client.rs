@@ -184,7 +184,7 @@ fn test_tron_native_graphql_request_uses_other_selector_shape() {
         chain_id: TRON_CHAIN_ID,
         from_block: 100,
         to_block: 110,
-        contracts: vec!["0x0000000000000000000000000000000000000000".to_owned()],
+        contracts: vec!["TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned()],
         topics: vec!["MessageDispatched".to_owned(), "MessageAccepted".to_owned()],
         finality_mode: ormpindexer::config::FinalityMode::Durable,
     })
@@ -208,7 +208,7 @@ fn test_tron_native_graphql_request_uses_other_selector_shape() {
     assert_eq!(input["selector"]["other"]["kind"], "tron_events");
     assert_eq!(
         input["selector"]["other"]["canonicalKey"],
-        "contracts/410000000000000000000000000000000000000000/events/MessageAccepted+MessageDispatched"
+        "contracts/TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t/events/MessageAccepted+MessageDispatched"
     );
     assert!(
         input["selector"]["other"]["fingerprint"]
@@ -221,6 +221,25 @@ fn test_tron_native_graphql_request_uses_other_selector_shape() {
         serde_json::json!({"kind": "block", "start": 100, "end": 110})
     );
     assert_eq!(input["finality"], "durable_only");
+}
+
+#[test]
+fn test_tron_native_graphql_request_rejects_invalid_contract_address() {
+    let error = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
+        chain_id: TRON_CHAIN_ID,
+        from_block: 100,
+        to_block: 110,
+        contracts: vec!["not/a/tron/address".to_owned()],
+        topics: Vec::new(),
+        finality_mode: ormpindexer::config::FinalityMode::Durable,
+    })
+    .expect_err("invalid Tron address should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Tron contract address must be hex")
+    );
 }
 
 #[test]
