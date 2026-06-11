@@ -72,6 +72,7 @@ impl DatalensHttpClient {
 
 impl DatalensLogReader for DatalensHttpClient {
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
+        let chain_name = evm_chain_name(query.chain_id)?;
         let request = json!({
             "query": r#"
                 query OrmpIndexerLogs($input: QueryInput!) {
@@ -84,7 +85,7 @@ impl DatalensLogReader for DatalensHttpClient {
                 "input": {
                     "chain": {
                         "family": { "kind": "evm" },
-                        "configuredName": evm_chain_name(query.chain_id),
+                        "configuredName": chain_name,
                         "networkId": { "numeric": query.chain_id },
                     },
                     "datasetKey": {
@@ -214,8 +215,8 @@ fn native_finality(finality_mode: FinalityMode) -> &'static str {
     }
 }
 
-fn evm_chain_name(chain_id: u64) -> &'static str {
-    match chain_id {
+pub fn evm_chain_name(chain_id: u64) -> anyhow::Result<&'static str> {
+    Ok(match chain_id {
         1 => "ethereum",
         44 => "crab",
         46 => "darwinia",
@@ -225,6 +226,6 @@ fn evm_chain_name(chain_id: u64) -> &'static str {
         42161 => "arbitrum",
         81457 => "blast",
         2818 => "morph",
-        _ => "ethereum",
-    }
+        _ => anyhow::bail!("unsupported EVM Datalens chain id: {chain_id}"),
+    })
 }

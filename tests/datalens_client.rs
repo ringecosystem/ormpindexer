@@ -1,4 +1,4 @@
-use ormpindexer::datalens::{DatalensLog, logs_from_native_query_payload};
+use ormpindexer::datalens::{DatalensLog, evm_chain_name, logs_from_native_query_payload};
 
 #[test]
 fn test_datalens_log_decodes_native_graphql_camel_case_response() {
@@ -104,4 +104,10 @@ fn test_native_query_rows_decode_with_context_metadata() {
     assert_eq!(logs[0].transaction_from, None);
     assert_eq!(logs[0].topics, vec!["0xtopic"]);
     assert_eq!(logs[0].data, "0xdata");
+}
+
+#[test]
+fn test_evm_chain_name_rejects_unknown_chain_ids() {
+    assert_eq!(evm_chain_name(46).expect("darwinia chain name"), "darwinia");
+    assert!(evm_chain_name(99_999).is_err());
 }
