@@ -4,8 +4,6 @@ use anyhow::{Context, bail};
 
 use crate::planner::{TRON_CHAIN_ID, default_chain_config};
 
-pub const DEFAULT_DATASET: &str = "datalens-native";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     pub datalens: DatalensConfig,
@@ -14,7 +12,6 @@ pub struct RuntimeConfig {
     pub batch_size: u64,
     pub start_block: u64,
     pub finality_mode: FinalityMode,
-    pub dataset: String,
     pub poll_interval: Duration,
 }
 
@@ -70,8 +67,6 @@ impl RuntimeConfig {
                 .map(str::parse)
                 .transpose()?
                 .unwrap_or(FinalityMode::Finalized),
-            dataset: optional_env(env, "ORMPINDEXER_DATASET")
-                .unwrap_or_else(|| DEFAULT_DATASET.to_owned()),
             poll_interval: Duration::from_secs(
                 optional_u64(env, "ORMPINDEXER_POLL_INTERVAL_SECS")?.unwrap_or(30),
             ),
@@ -157,7 +152,7 @@ impl std::str::FromStr for FinalityMode {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "finalized" | "safe" => Ok(Self::Finalized),
+            "finalized" => Ok(Self::Finalized),
             "durable" => Ok(Self::Durable),
             _ => bail!("ORMPINDEXER_FINALITY_MODE must be finalized or durable"),
         }

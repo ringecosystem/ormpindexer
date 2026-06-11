@@ -140,6 +140,30 @@ fn test_runtime_config_accepts_tron_chain_defaults() {
 }
 
 #[test]
+fn test_runtime_config_rejects_safe_finality_for_persistent_indexing() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_FINALITY_MODE".to_owned(), "safe".to_owned()),
+    ]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("safe mode is rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_FINALITY_MODE must be finalized or durable")
+    );
+}
+
+#[test]
 fn test_runtime_config_requires_tron_start_block() {
     let env = BTreeMap::from([(
         "ORMPINDEXER_ENABLED_CHAINS".to_owned(),

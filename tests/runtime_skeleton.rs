@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use ormpindexer::{
     checkpoint::{Checkpoint, InMemoryCheckpointStore, plan_next_range},
@@ -197,6 +197,72 @@ async fn test_runner_empty_logs_still_advance_after_successful_query_and_write()
 }
 
 #[tokio::test]
+async fn test_runner_skips_chain_when_checkpoint_is_ahead_of_datalens_head() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 9);
+    let runner = IndexerRunner::new(
+        config,
+        reader,
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("ahead checkpoint skips");
+
+    assert_eq!(report, RunnerReport::default());
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);
+}
+
+#[tokio::test]
+async fn test_runner_caps_query_range_at_datalens_head() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 12);
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("capped batch succeeds");
+
+    assert_eq!(report.checkpoints_advanced, 1);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 13);
+    assert_eq!(reader.queries.borrow()[0].from_block, 10);
+    assert_eq!(reader.queries.borrow()[0].to_block, 12);
+}
+
+#[tokio::test]
 async fn test_runner_writer_failure_does_not_advance_checkpoint() {
     let env = BTreeMap::from([
         (
@@ -276,21 +342,37 @@ async fn test_runner_reports_and_advances_multiple_chains() {
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
 }
 
+#[derive(Clone)]
 struct RecordingDatalensReader {
     logs: Vec<DatalensLog>,
-    queries: RefCell<Vec<DatalensLogQuery>>,
+    heads: BTreeMap<u64, u64>,
+    queries: Rc<RefCell<Vec<DatalensLogQuery>>>,
 }
 
 impl RecordingDatalensReader {
     fn new(logs: Vec<DatalensLog>) -> Self {
         Self {
             logs,
-            queries: RefCell::new(Vec::new()),
+            heads: BTreeMap::new(),
+            queries: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    fn with_head(mut self, chain_id: u64, head: u64) -> Self {
+        self.heads.insert(chain_id, head);
+        self
     }
 }
 
 impl DatalensLogReader for RecordingDatalensReader {
+    async fn latest_block(
+        &self,
+        chain_id: u64,
+        _finality_mode: FinalityMode,
+    ) -> anyhow::Result<u64> {
+        Ok(*self.heads.get(&chain_id).unwrap_or(&u64::MAX))
+    }
+
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
         self.queries.borrow_mut().push(query);
         Ok(DatalensLogQueryResult {

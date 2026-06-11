@@ -242,6 +242,100 @@ fn test_decode_native_graphql_log_preserves_metadata_in_legacy_row() {
 }
 
 #[test]
+fn test_decode_evm_indexed_topics_preserves_legacy_fields() {
+    let msg_hash = bytes32(0x44);
+    let accepted = DatalensLog {
+        topics: vec![ORMP_MESSAGE_ACCEPTED_TOPIC.to_owned(), bytes_hex(0x44)],
+        data: format!(
+            "0x{}",
+            hex::encode(encode(&[Token::Tuple(vec![
+                Token::Address(address(0x21)),
+                Token::Uint(U256::from(8)),
+                Token::Uint(U256::from(46)),
+                Token::Address(address(0x22)),
+                Token::Uint(U256::from(137)),
+                Token::Address(address(0x23)),
+                Token::Uint(U256::from(500_000)),
+                Token::Bytes(vec![0xab, 0xcd]),
+            ])]))
+        ),
+        ..log(ORMP_MESSAGE_ACCEPTED_TOPIC, ORMP_ADDRESS, Vec::new())
+    };
+    assert_eq!(
+        decode_evm_log(&accepted).expect("indexed MessageAccepted decodes"),
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: metadata(ORMP_ADDRESS),
+            msg_hash: bytes_hex(0x44),
+            channel: address_hex(0x21),
+            index: 8,
+            from_chain_id: 46,
+            from: address_hex(0x22),
+            to_chain_id: 137,
+            to: address_hex(0x23),
+            gas_limit: 500_000,
+            encoded: "0xabcd".to_owned(),
+        }
+    );
+
+    let assigned = DatalensLog {
+        topics: vec![
+            ORMP_MESSAGE_ASSIGNED_TOPIC.to_owned(),
+            bytes_hex(0x44),
+            address_topic(0x24),
+            address_topic(0x25),
+        ],
+        data: format!(
+            "0x{}",
+            hex::encode(encode(&[
+                Token::Uint(U256::from(9)),
+                Token::Uint(U256::from(10)),
+                Token::Bytes(vec![0x01, 0x02]),
+            ]))
+        ),
+        ..log(ORMP_MESSAGE_ASSIGNED_TOPIC, ORMP_ADDRESS, Vec::new())
+    };
+    assert_eq!(
+        decode_evm_log(&assigned).expect("indexed MessageAssigned decodes"),
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: metadata(ORMP_ADDRESS),
+            msg_hash: format!("0x{}", hex::encode(msg_hash)),
+            oracle: address_hex(0x24),
+            relayer: address_hex(0x25),
+            oracle_fee: 9,
+            relayer_fee: 10,
+            params: "0x0102".to_owned(),
+        }
+    );
+
+    let sent = DatalensLog {
+        topics: vec![MSGPORT_MESSAGE_SENT_TOPIC.to_owned(), bytes_hex(0x55)],
+        data: format!(
+            "0x{}",
+            hex::encode(encode(&[
+                Token::Address(address(0x30)),
+                Token::Uint(U256::from(42161)),
+                Token::Address(address(0x31)),
+                Token::Bytes(vec![0xaa]),
+                Token::Bytes(vec![0xbb, 0xcc]),
+            ]))
+        ),
+        ..log(MSGPORT_MESSAGE_SENT_TOPIC, MSGPORT_ADDRESS, Vec::new())
+    };
+    assert_eq!(
+        decode_evm_log(&sent).expect("indexed MessageSent decodes"),
+        LegacyOrmPEvent::MsgportMessageSent {
+            metadata: metadata(MSGPORT_ADDRESS),
+            msg_id: bytes_hex(0x55),
+            from_dapp: address_hex(0x30),
+            to_chain_id: 42161,
+            to_dapp: address_hex(0x31),
+            message: "0xaa".to_owned(),
+            params: "0xbbcc".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn test_decode_errors_are_explicit() {
     let missing_topic = DatalensLog {
         topics: Vec::new(),
@@ -330,6 +424,10 @@ fn address(value: u64) -> H160 {
 
 fn address_hex(value: u64) -> String {
     format!("0x{}", hex::encode(address(value).as_bytes()))
+}
+
+fn address_topic(value: u64) -> String {
+    format!("0x{:0>64}", &address_hex(value)[2..])
 }
 
 fn bytes32(value: u8) -> Vec<u8> {
