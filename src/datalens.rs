@@ -18,16 +18,21 @@ pub struct DatalensLogQuery {
 pub struct DatalensLog {
     #[serde(default)]
     pub id: Option<String>,
+    #[serde(alias = "chain_id")]
     pub chain_id: u64,
+    #[serde(alias = "block_number")]
     pub block_number: u64,
-    #[serde(default)]
+    #[serde(default, alias = "block_timestamp")]
     pub block_timestamp: Option<u64>,
+    #[serde(alias = "transaction_hash")]
     pub transaction_hash: String,
-    #[serde(default)]
+    #[serde(default, alias = "transaction_index")]
     pub transaction_index: Option<i32>,
+    #[serde(alias = "log_index", alias = "eventIndex", alias = "event_index")]
     pub log_index: u64,
+    #[serde(alias = "contractAddress", alias = "contract_address")]
     pub address: String,
-    #[serde(default)]
+    #[serde(default, alias = "transaction_from")]
     pub transaction_from: Option<String>,
     pub topics: Vec<String>,
     pub data: String,

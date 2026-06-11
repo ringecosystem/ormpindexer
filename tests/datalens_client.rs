@@ -29,3 +29,33 @@ fn test_datalens_log_decodes_native_graphql_camel_case_response() {
     assert_eq!(log.topics, vec!["0xtopic"]);
     assert_eq!(log.data, "0xdata");
 }
+
+#[test]
+fn test_datalens_log_decodes_legacy_snake_case_response() {
+    let log: DatalensLog = serde_json::from_value(serde_json::json!({
+        "id": "46-0xtx-7",
+        "chain_id": 46,
+        "block_number": 123,
+        "block_timestamp": 456,
+        "transaction_hash": "0xtx",
+        "transaction_index": 2,
+        "eventIndex": 7,
+        "address": "0xcontract",
+        "transaction_from": "0xsender",
+        "topics": ["0xtopic"],
+        "data": "0xdata"
+    }))
+    .expect("decode legacy-compatible log shape");
+
+    assert_eq!(log.id.as_deref(), Some("46-0xtx-7"));
+    assert_eq!(log.chain_id, 46);
+    assert_eq!(log.block_number, 123);
+    assert_eq!(log.block_timestamp, Some(456));
+    assert_eq!(log.transaction_hash, "0xtx");
+    assert_eq!(log.transaction_index, Some(2));
+    assert_eq!(log.log_index, 7);
+    assert_eq!(log.address, "0xcontract");
+    assert_eq!(log.transaction_from.as_deref(), Some("0xsender"));
+    assert_eq!(log.topics, vec!["0xtopic"]);
+    assert_eq!(log.data, "0xdata");
+}
