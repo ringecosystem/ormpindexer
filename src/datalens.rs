@@ -15,11 +15,19 @@ pub struct DatalensLogQuery {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DatalensLog {
+    #[serde(default)]
+    pub id: Option<String>,
     pub chain_id: u64,
     pub block_number: u64,
+    #[serde(default)]
+    pub block_timestamp: Option<u64>,
     pub transaction_hash: String,
+    #[serde(default)]
+    pub transaction_index: Option<i32>,
     pub log_index: u64,
     pub address: String,
+    #[serde(default)]
+    pub transaction_from: Option<String>,
     pub topics: Vec<String>,
     pub data: String,
 }
@@ -62,11 +70,15 @@ impl DatalensLogReader for DatalensHttpClient {
             "query": r#"
                 query OrmpIndexerLogs($input: EvmLogsInput!) {
                   evmLogs(input: $input) {
+                    id
                     chainId
                     blockNumber
+                    blockTimestamp
                     transactionHash
+                    transactionIndex
                     logIndex
                     address
+                    transactionFrom
                     topics
                     data
                   }

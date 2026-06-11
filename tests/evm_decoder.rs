@@ -1,0 +1,292 @@
+use ethabi::{
+    Token, encode,
+    ethereum_types::{H160, U256},
+};
+use ormpindexer::{
+    datalens::DatalensLog,
+    decoder::decode_evm_log,
+    planner::{
+        MSGPORT_ADDRESS, MSGPORT_MESSAGE_RECV_TOPIC, MSGPORT_MESSAGE_SENT_TOPIC, ORMP_ADDRESS,
+        ORMP_HASH_IMPORTED_TOPIC, ORMP_MESSAGE_ACCEPTED_TOPIC, ORMP_MESSAGE_ASSIGNED_TOPIC,
+        ORMP_MESSAGE_DISPATCHED_TOPIC, SIGNATURE_PUB_ADDRESS,
+        SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
+    },
+    schema::{EventSource, LegacyOrmPEvent},
+};
+
+#[test]
+fn test_decode_ormp_events_preserves_legacy_fields() {
+    let msg_hash = bytes32(0x11);
+    let hash_imported = decode_evm_log(&log(
+        ORMP_HASH_IMPORTED_TOPIC,
+        ORMP_ADDRESS,
+        encode(&[
+            Token::Address(address(0x10)),
+            Token::Uint(U256::from(46)),
+            Token::Address(address(0x20)),
+            Token::Uint(U256::from(7)),
+            Token::FixedBytes(msg_hash.clone()),
+        ]),
+    ))
+    .expect("HashImported decodes");
+    assert_eq!(
+        hash_imported,
+        LegacyOrmPEvent::HashImported {
+            metadata: metadata(ORMP_ADDRESS),
+            src_chain_id: 46,
+            target_chain_id: 1,
+            oracle: address_hex(0x10),
+            channel: address_hex(0x20),
+            msg_index: 7,
+            hash: bytes_hex(0x11),
+        }
+    );
+
+    let accepted = decode_evm_log(&log(
+        ORMP_MESSAGE_ACCEPTED_TOPIC,
+        ORMP_ADDRESS,
+        encode(&[
+            Token::FixedBytes(msg_hash.clone()),
+            Token::Tuple(vec![
+                Token::Address(address(0x21)),
+                Token::Uint(U256::from(8)),
+                Token::Uint(U256::from(46)),
+                Token::Address(address(0x22)),
+                Token::Uint(U256::from(137)),
+                Token::Address(address(0x23)),
+                Token::Uint(U256::from(500_000)),
+                Token::Bytes(vec![0xab, 0xcd]),
+            ]),
+        ]),
+    ))
+    .expect("MessageAccepted decodes");
+    assert_eq!(
+        accepted,
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: metadata(ORMP_ADDRESS),
+            msg_hash: bytes_hex(0x11),
+            channel: address_hex(0x21),
+            index: 8,
+            from_chain_id: 46,
+            from: address_hex(0x22),
+            to_chain_id: 137,
+            to: address_hex(0x23),
+            gas_limit: 500_000,
+            encoded: "0xabcd".to_owned(),
+        }
+    );
+
+    let assigned = decode_evm_log(&log(
+        ORMP_MESSAGE_ASSIGNED_TOPIC,
+        ORMP_ADDRESS,
+        encode(&[
+            Token::FixedBytes(msg_hash.clone()),
+            Token::Address(address(0x24)),
+            Token::Address(address(0x25)),
+            Token::Uint(U256::from(9)),
+            Token::Uint(U256::from(10)),
+            Token::Bytes(vec![0x01, 0x02]),
+        ]),
+    ))
+    .expect("MessageAssigned decodes");
+    assert_eq!(
+        assigned,
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: metadata(ORMP_ADDRESS),
+            msg_hash: bytes_hex(0x11),
+            oracle: address_hex(0x24),
+            relayer: address_hex(0x25),
+            oracle_fee: 9,
+            relayer_fee: 10,
+            params: "0x0102".to_owned(),
+        }
+    );
+
+    let dispatched = decode_evm_log(&log(
+        ORMP_MESSAGE_DISPATCHED_TOPIC,
+        ORMP_ADDRESS,
+        encode(&[Token::FixedBytes(msg_hash), Token::Bool(true)]),
+    ))
+    .expect("MessageDispatched decodes");
+    assert_eq!(
+        dispatched,
+        LegacyOrmPEvent::MessageDispatched {
+            metadata: metadata(ORMP_ADDRESS),
+            target_chain_id: 1,
+            msg_hash: bytes_hex(0x11),
+            dispatch_result: true,
+        }
+    );
+}
+
+#[test]
+fn test_decode_msgport_and_signature_events_preserves_legacy_fields() {
+    let msg_id = bytes32(0x33);
+
+    let recv = decode_evm_log(&log(
+        MSGPORT_MESSAGE_RECV_TOPIC,
+        MSGPORT_ADDRESS,
+        encode(&[
+            Token::FixedBytes(msg_id.clone()),
+            Token::Bool(false),
+            Token::Bytes(vec![0xff]),
+        ]),
+    ))
+    .expect("MessageRecv decodes");
+    assert_eq!(
+        recv,
+        LegacyOrmPEvent::MsgportMessageRecv {
+            metadata: metadata(MSGPORT_ADDRESS),
+            msg_id: bytes_hex(0x33),
+            result: false,
+            return_data: "0xff".to_owned(),
+        }
+    );
+
+    let sent = decode_evm_log(&log(
+        MSGPORT_MESSAGE_SENT_TOPIC,
+        MSGPORT_ADDRESS,
+        encode(&[
+            Token::FixedBytes(msg_id),
+            Token::Address(address(0x30)),
+            Token::Uint(U256::from(42161)),
+            Token::Address(address(0x31)),
+            Token::Bytes(vec![0xaa]),
+            Token::Bytes(vec![0xbb, 0xcc]),
+        ]),
+    ))
+    .expect("MessageSent decodes");
+    assert_eq!(
+        sent,
+        LegacyOrmPEvent::MsgportMessageSent {
+            metadata: metadata(MSGPORT_ADDRESS),
+            msg_id: bytes_hex(0x33),
+            from_dapp: address_hex(0x30),
+            to_chain_id: 42161,
+            to_dapp: address_hex(0x31),
+            message: "0xaa".to_owned(),
+            params: "0xbbcc".to_owned(),
+        }
+    );
+
+    let submittion = decode_evm_log(&log(
+        SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
+        SIGNATURE_PUB_ADDRESS,
+        encode(&[
+            Token::Uint(U256::from(46)),
+            Token::Address(address(0x40)),
+            Token::Address(address(0x41)),
+            Token::Uint(U256::from(12)),
+            Token::Bytes(vec![0xde, 0xad]),
+            Token::Bytes(vec![0xbe, 0xef]),
+        ]),
+    ))
+    .expect("SignatureSubmittion decodes");
+    assert_eq!(
+        submittion,
+        LegacyOrmPEvent::SignatureSubmittion {
+            metadata: metadata(SIGNATURE_PUB_ADDRESS),
+            chain_id: 46,
+            channel: address_hex(0x40),
+            signer: address_hex(0x41),
+            msg_index: 12,
+            signature: "0xdead".to_owned(),
+            data: "0xbeef".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn test_decode_errors_are_explicit() {
+    let missing_topic = DatalensLog {
+        topics: Vec::new(),
+        ..log(MSGPORT_MESSAGE_RECV_TOPIC, MSGPORT_ADDRESS, Vec::new())
+    };
+    assert!(
+        decode_evm_log(&missing_topic)
+            .expect_err("missing topic should fail")
+            .to_string()
+            .contains("missing topic0")
+    );
+
+    let unknown = DatalensLog {
+        topics: vec![bytes_hex(0x99)],
+        ..log(MSGPORT_MESSAGE_RECV_TOPIC, MSGPORT_ADDRESS, Vec::new())
+    };
+    assert!(
+        decode_evm_log(&unknown)
+            .expect_err("unknown topic should fail")
+            .to_string()
+            .contains("unsupported ORMP EVM event topic0")
+    );
+
+    let malformed = log(
+        MSGPORT_MESSAGE_RECV_TOPIC,
+        MSGPORT_ADDRESS,
+        vec![0x01, 0x02],
+    );
+    assert!(
+        decode_evm_log(&malformed)
+            .expect_err("malformed ABI should fail")
+            .to_string()
+            .contains("decode ABI event data")
+    );
+
+    let missing_metadata = DatalensLog {
+        block_timestamp: None,
+        ..log(MSGPORT_MESSAGE_RECV_TOPIC, MSGPORT_ADDRESS, Vec::new())
+    };
+    assert!(
+        decode_evm_log(&missing_metadata)
+            .expect_err("missing metadata should fail")
+            .to_string()
+            .contains("missing block timestamp")
+    );
+}
+
+fn log(topic: &str, address: &str, data: Vec<u8>) -> DatalensLog {
+    DatalensLog {
+        id: Some("1-100-0".to_owned()),
+        chain_id: 1,
+        block_number: 100,
+        block_timestamp: Some(1_700_000_000_000),
+        transaction_hash: bytes_hex(0xaa),
+        transaction_index: Some(2),
+        log_index: 3,
+        address: address.to_owned(),
+        transaction_from: Some(address_hex(0x50)),
+        topics: vec![topic.to_owned()],
+        data: format!("0x{}", hex::encode(data)),
+    }
+}
+
+fn metadata(address: &str) -> ormpindexer::schema::ChainLogMetadata {
+    ormpindexer::schema::ChainLogMetadata {
+        id: "1-100-0".to_owned(),
+        source: EventSource::Evm,
+        chain_id: 1,
+        block_number: 100,
+        block_timestamp: 1_700_000_000_000,
+        transaction_hash: bytes_hex(0xaa),
+        transaction_index: 2,
+        log_index: 3,
+        contract_address: address.to_ascii_lowercase(),
+        transaction_from: Some(address_hex(0x50)),
+    }
+}
+
+fn address(value: u64) -> H160 {
+    H160::from_low_u64_be(value)
+}
+
+fn address_hex(value: u64) -> String {
+    format!("0x{}", hex::encode(address(value).as_bytes()))
+}
+
+fn bytes32(value: u8) -> Vec<u8> {
+    vec![value; 32]
+}
+
+fn bytes_hex(value: u8) -> String {
+    format!("0x{}", hex::encode(bytes32(value)))
+}
