@@ -359,6 +359,40 @@ fn test_decode_evm_indexed_topics_preserves_legacy_fields() {
             params: "0xbbcc".to_owned(),
         }
     );
+
+    let submittion = DatalensLog {
+        topics: vec![
+            SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC.to_owned(),
+            uint_topic(46),
+            address_topic(0x40),
+            address_topic(0x41),
+        ],
+        data: format!(
+            "0x{}",
+            hex::encode(encode(&[
+                Token::Uint(U256::from(12)),
+                Token::Bytes(vec![0xde, 0xad]),
+                Token::Bytes(vec![0xbe, 0xef]),
+            ]))
+        ),
+        ..log(
+            SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
+            SIGNATURE_PUB_ADDRESS,
+            Vec::new(),
+        )
+    };
+    assert_eq!(
+        decode_evm_log(&submittion).expect("indexed SignatureSubmittion decodes"),
+        LegacyOrmPEvent::SignatureSubmittion {
+            metadata: metadata(SIGNATURE_PUB_ADDRESS),
+            chain_id: 46,
+            channel: address_hex(0x40),
+            signer: address_hex(0x41),
+            msg_index: 12,
+            signature: "0xdead".to_owned(),
+            data: "0xbeef".to_owned(),
+        }
+    );
 }
 
 #[test]
@@ -454,6 +488,10 @@ fn address_hex(value: u64) -> String {
 
 fn address_topic(value: u64) -> String {
     format!("0x{:0>64}", &address_hex(value)[2..])
+}
+
+fn uint_topic(value: u64) -> String {
+    format!("0x{value:0>64x}")
 }
 
 fn bytes32(value: u8) -> Vec<u8> {

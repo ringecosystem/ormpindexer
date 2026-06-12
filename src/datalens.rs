@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use anyhow::Context;
+
 use crate::config::{DatalensConfig, FinalityMode};
 use crate::planner::TRON_CHAIN_ID;
 use crate::warmup::{
@@ -241,19 +243,8 @@ pub fn logs_from_native_query_payload(
 }
 
 fn native_log_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<NativeLogRow>> {
-    if rows.is_array() {
-        return Ok(serde_json::from_value(rows.clone())?);
-    }
-
-    if let Some(value) = rows.pointer("/rows/rows") {
-        return Ok(serde_json::from_value(value.clone())?);
-    }
-
-    if let Some(value) = rows.pointer("/rows") {
-        return Ok(serde_json::from_value(value.clone())?);
-    }
-
-    anyhow::bail!("Datalens native query response missing evm log rows")
+    let rows = native_rows(rows).context("Datalens native query response missing evm log rows")?;
+    Ok(serde_json::from_value(rows.clone())?)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -367,19 +358,17 @@ impl NativeTronEventRow {
 }
 
 fn native_tron_event_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<NativeTronEventRow>> {
+    let rows =
+        native_rows(rows).context("Datalens native query response missing Tron event rows")?;
+    Ok(serde_json::from_value(rows.clone())?)
+}
+
+fn native_rows(rows: &serde_json::Value) -> Option<&serde_json::Value> {
     if rows.is_array() {
-        return Ok(serde_json::from_value(rows.clone())?);
+        return Some(rows);
     }
 
-    if let Some(value) = rows.pointer("/rows/rows") {
-        return Ok(serde_json::from_value(value.clone())?);
-    }
-
-    if let Some(value) = rows.pointer("/rows") {
-        return Ok(serde_json::from_value(value.clone())?);
-    }
-
-    anyhow::bail!("Datalens native query response missing Tron event rows")
+    rows.get("rows").and_then(native_rows)
 }
 
 fn evm_query_input(query: &DatalensLogQuery) -> anyhow::Result<serde_json::Value> {
