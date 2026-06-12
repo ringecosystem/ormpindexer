@@ -52,7 +52,7 @@ pub fn decode_evm_log(log: &DatalensLog) -> anyhow::Result<LegacyOrmPEvent> {
     let data = decode_hex(&log.data).context("decode EVM log data")?;
 
     match topic0.as_str() {
-        ORMP_HASH_IMPORTED_TOPIC => decode_hash_imported(metadata, &data),
+        ORMP_HASH_IMPORTED_TOPIC => decode_hash_imported(metadata, &log.topics, &data),
         ORMP_MESSAGE_ACCEPTED_TOPIC => decode_message_accepted(metadata, &log.topics, &data),
         ORMP_MESSAGE_ASSIGNED_TOPIC => decode_message_assigned(metadata, &log.topics, &data),
         ORMP_MESSAGE_DISPATCHED_TOPIC => decode_message_dispatched(metadata, &log.topics, &data),
@@ -255,8 +255,30 @@ fn decode_tron_signature_submittion(
 
 fn decode_hash_imported(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 1 {
+        let mut tokens = decode_event(
+            &[
+                ParamType::Uint(256),
+                ParamType::Address,
+                ParamType::Uint(256),
+                ParamType::FixedBytes(32),
+            ],
+            data,
+        )?;
+        return Ok(LegacyOrmPEvent::HashImported {
+            target_chain_id: metadata.chain_id,
+            metadata,
+            oracle: topic_address(topics, 1, "oracle")?,
+            src_chain_id: token_uint(take(&mut tokens, "chainId")?)?,
+            channel: token_address(take(&mut tokens, "channel")?)?,
+            msg_index: token_uint(take(&mut tokens, "msgIndex")?)?,
+            hash: token_fixed_bytes(take(&mut tokens, "hash")?)?,
+        });
+    }
+
     let mut tokens = decode_event(
         &[
             ParamType::Address,
