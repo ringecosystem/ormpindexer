@@ -1,7 +1,11 @@
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use ormpindexer::{
-    checkpoint::{Checkpoint, InMemoryCheckpointStore, plan_next_range},
+    checkpoint::{Checkpoint, CheckpointStore, InMemoryCheckpointStore, plan_next_range},
     config::{FinalityMode, RuntimeConfig},
     database::{DryRunEventWriter, EventWriter},
     datalens::{DatalensLog, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader},
@@ -334,8 +338,9 @@ async fn test_runner_caps_query_range_at_datalens_head() {
 
     assert_eq!(report.checkpoints_advanced, 1);
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 13);
-    assert_eq!(reader.queries.borrow()[0].from_block, 10);
-    assert_eq!(reader.queries.borrow()[0].to_block, 12);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(queries[0].from_block, 10);
+    assert_eq!(queries[0].to_block, 12);
 }
 
 #[tokio::test]
@@ -368,7 +373,12 @@ async fn test_runner_writer_failure_does_not_advance_checkpoint() {
         .await
         .expect_err("writer failure fails the batch");
 
-    assert!(error.to_string().contains("write failed"));
+    let error_chain = format!("{error:#}");
+    assert!(
+        error_chain
+            .contains("write ORMP events chain_id=46 dataset=evm.logs from_block=10 to_block=14")
+    );
+    assert!(error_chain.contains("write failed"));
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);
 }
 
@@ -418,11 +428,68 @@ async fn test_runner_reports_and_advances_multiple_chains() {
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_runner_slow_chain_does_not_block_other_chain_checkpoint_progress() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "1,46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    checkpoints
+        .read_or_create(1, "evm.logs", 10)
+        .await
+        .expect("seed slow chain checkpoint");
+    checkpoints
+        .read_or_create(46, "evm.logs", 10)
+        .await
+        .expect("seed fast chain checkpoint");
+    let runner = IndexerRunner::new(
+        config,
+        RecordingDatalensReader::new(Vec::new()).with_query_delay(1, Duration::from_millis(300)),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let run = tokio::spawn(async move { runner.run_once().await });
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        if checkpoints.next_block(46, "evm.logs").await.unwrap() == 15 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fast chain checkpoint was not advanced before slow chain completed"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let report = run
+        .await
+        .expect("runner task joins")
+        .expect("multi-chain pass succeeds");
+
+    assert_eq!(report.checkpoints_advanced, 2);
+    assert_eq!(checkpoints.next_block(1, "evm.logs").await.unwrap(), 15);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
+}
+
 #[derive(Clone)]
 struct RecordingDatalensReader {
     logs: Vec<DatalensLog>,
     heads: BTreeMap<u64, u64>,
-    queries: Rc<RefCell<Vec<DatalensLogQuery>>>,
+    query_delays: BTreeMap<u64, Duration>,
+    queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
 }
 
 impl RecordingDatalensReader {
@@ -430,12 +497,18 @@ impl RecordingDatalensReader {
         Self {
             logs,
             heads: BTreeMap::new(),
-            queries: Rc::new(RefCell::new(Vec::new())),
+            query_delays: BTreeMap::new(),
+            queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn with_head(mut self, chain_id: u64, head: u64) -> Self {
         self.heads.insert(chain_id, head);
+        self
+    }
+
+    fn with_query_delay(mut self, chain_id: u64, delay: Duration) -> Self {
+        self.query_delays.insert(chain_id, delay);
         self
     }
 }
@@ -450,7 +523,10 @@ impl DatalensLogReader for RecordingDatalensReader {
     }
 
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
-        self.queries.borrow_mut().push(query);
+        if let Some(delay) = self.query_delays.get(&query.chain_id) {
+            tokio::time::sleep(*delay).await;
+        }
+        self.queries.lock().expect("queries lock").push(query);
         Ok(DatalensLogQueryResult {
             logs: self.logs.clone(),
         })

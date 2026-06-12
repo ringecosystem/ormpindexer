@@ -1,5 +1,5 @@
 use anyhow::{Context, bail, ensure};
-use ethabi::{ParamType, Token, decode};
+use ethabi::{ParamType, Token, decode, ethereum_types::U256};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -58,7 +58,9 @@ pub fn decode_evm_log(log: &DatalensLog) -> anyhow::Result<LegacyOrmPEvent> {
         ORMP_MESSAGE_DISPATCHED_TOPIC => decode_message_dispatched(metadata, &log.topics, &data),
         MSGPORT_MESSAGE_RECV_TOPIC => decode_msgport_message_recv(metadata, &log.topics, &data),
         MSGPORT_MESSAGE_SENT_TOPIC => decode_msgport_message_sent(metadata, &log.topics, &data),
-        SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC => decode_signature_submittion(metadata, &data),
+        SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC => {
+            decode_signature_submittion(metadata, &log.topics, &data)
+        }
         _ => bail!("unsupported ORMP EVM event topic0 {topic0}"),
     }
 }
@@ -521,8 +523,25 @@ fn decode_msgport_message_sent(
 
 fn decode_signature_submittion(
     metadata: ChainLogMetadata,
+    topics: &[String],
     data: &[u8],
 ) -> anyhow::Result<LegacyOrmPEvent> {
+    if topics.len() > 3 {
+        let mut tokens = decode_event(
+            &[ParamType::Uint(256), ParamType::Bytes, ParamType::Bytes],
+            data,
+        )?;
+        return Ok(LegacyOrmPEvent::SignatureSubmittion {
+            metadata,
+            chain_id: topic_uint(topics, 1, "chainId")?,
+            channel: topic_address(topics, 2, "channel")?,
+            signer: topic_address(topics, 3, "signer")?,
+            msg_index: token_uint(take(&mut tokens, "msgIndex")?)?,
+            signature: token_bytes(take(&mut tokens, "signature")?)?,
+            data: token_bytes(take(&mut tokens, "data")?)?,
+        });
+    }
+
     let mut tokens = decode_event(
         &[
             ParamType::Uint(256),
@@ -619,6 +638,24 @@ fn topic_address(topics: &[String], index: usize, name: &str) -> anyhow::Result<
         "EVM indexed topic {name} must be 32 bytes"
     );
     Ok(format!("0x{}", &address[24..64]))
+}
+
+fn topic_uint(topics: &[String], index: usize, name: &str) -> anyhow::Result<u128> {
+    let topic = topics
+        .get(index)
+        .with_context(|| format!("EVM indexed topic {name} is missing"))?;
+    let topic = normalize_hex(topic)?;
+    let value = U256::from_str_radix(
+        topic
+            .strip_prefix("0x")
+            .context("normalized topic is missing 0x prefix")?,
+        16,
+    )?;
+    ensure!(
+        value.bits() <= 128,
+        "EVM indexed topic {name} overflows u128"
+    );
+    Ok(value.as_u128())
 }
 
 fn normalize_hex(value: &str) -> anyhow::Result<String> {

@@ -179,6 +179,32 @@ fn test_tron_native_query_rows_decode_with_context_metadata() {
 }
 
 #[test]
+fn test_tron_native_query_rows_decode_nested_empty_adapter_response() {
+    let logs = logs_from_native_query_payload(
+        &serde_json::json!({
+            "data": {
+                "query": {
+                    "rows": {
+                        "dataset_key": { "family": { "Other": "tron" }, "name": "events" },
+                        "rows": {
+                            "dataset": "adapter_json",
+                            "rows": {
+                                "dataset_key": { "family": { "Other": "tron" }, "name": "events" },
+                                "rows": []
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+        TRON_CHAIN_ID,
+    )
+    .expect("decode nested empty Tron adapter response");
+
+    assert!(logs.is_empty());
+}
+
+#[test]
 fn test_tron_native_graphql_request_uses_other_selector_shape() {
     let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
         chain_id: TRON_CHAIN_ID,
