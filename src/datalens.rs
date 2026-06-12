@@ -4,6 +4,10 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{DatalensConfig, FinalityMode};
 use crate::planner::TRON_CHAIN_ID;
+use crate::warmup::{
+    DatalensWarmupEnsurer, DatalensWarmupSubmitRequest, WarmupSubmitApiResponse,
+    WarmupSubmitResponse,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensLogQuery {
@@ -82,6 +86,13 @@ impl DatalensHttpClient {
         )
     }
 
+    fn warmup_tasks_endpoint(&self) -> String {
+        format!(
+            "{}/v1/warmup/tasks",
+            self.config.endpoint.trim_end_matches('/')
+        )
+    }
+
     fn chain_head_endpoint(
         &self,
         chain_id: u64,
@@ -93,6 +104,39 @@ impl DatalensHttpClient {
             self.config.endpoint.trim_end_matches('/'),
             chain_head_finality(finality_mode),
         ))
+    }
+
+    pub async fn submit_warmup_task(
+        &self,
+        request: DatalensWarmupSubmitRequest,
+    ) -> anyhow::Result<WarmupSubmitResponse> {
+        let mut builder = self
+            .http
+            .post(self.warmup_tasks_endpoint())
+            .header("x-datalens-application", &self.config.application)
+            .json(&request);
+        if let Some(token) = &self.config.token {
+            builder = builder.bearer_auth(token.expose_secret());
+        }
+
+        let response = builder.send().await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Datalens warmup submit failed with status {status}: {body}");
+        }
+
+        let payload: WarmupSubmitApiResponse = serde_json::from_str(&body)?;
+        Ok(payload.into_submit_response())
+    }
+}
+
+impl DatalensWarmupEnsurer for DatalensHttpClient {
+    async fn ensure_warmup_task(
+        &self,
+        request: DatalensWarmupSubmitRequest,
+    ) -> anyhow::Result<WarmupSubmitResponse> {
+        self.submit_warmup_task(request).await
     }
 }
 

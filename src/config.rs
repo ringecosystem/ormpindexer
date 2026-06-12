@@ -2,11 +2,15 @@ use std::{collections::BTreeMap, env, fmt, time::Duration};
 
 use anyhow::{Context, bail};
 
-use crate::planner::{TRON_CHAIN_ID, default_chain_config};
+use crate::{
+    planner::{TRON_CHAIN_ID, default_chain_config},
+    warmup::DatalensWarmupConfig,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     pub datalens: DatalensConfig,
+    pub warmup: DatalensWarmupConfig,
     pub database_url: Option<SecretString>,
     pub enabled_chains: Vec<ChainConfig>,
     pub batch_size: u64,
@@ -50,6 +54,16 @@ impl RuntimeConfig {
             .map(|chain_id| ChainConfig::from_env_map(env, chain_id, start_block))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
+        let batch_size = optional_u64(env, "ORMPINDEXER_BATCH_SIZE")?.unwrap_or(1_000);
+        if batch_size == 0 {
+            bail!("ORMPINDEXER_BATCH_SIZE must be greater than zero");
+        }
+        let warmup_chunk_size =
+            optional_u64(env, "ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE")?.unwrap_or(batch_size);
+        if warmup_chunk_size == 0 {
+            bail!("ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE must be greater than zero");
+        }
+
         Ok(Self {
             datalens: DatalensConfig {
                 endpoint: optional_env(env, "ORMPINDEXER_DATALENS_ENDPOINT")
@@ -58,9 +72,22 @@ impl RuntimeConfig {
                     .unwrap_or_else(|| "ormpindexer".to_owned()),
                 token: optional_env(env, "ORMPINDEXER_DATALENS_TOKEN").map(SecretString::new),
             },
+            warmup: DatalensWarmupConfig {
+                enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?
+                    .unwrap_or(false),
+                ensure_on_startup: optional_bool(
+                    env,
+                    "ORMPINDEXER_DATALENS_WARMUP_ENSURE_ON_STARTUP",
+                )?
+                .unwrap_or(true),
+                required: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_REQUIRED")?
+                    .unwrap_or(false),
+                chunk_size: warmup_chunk_size,
+                end_block: optional_u64(env, "ORMPINDEXER_DATALENS_WARMUP_END_BLOCK")?,
+            },
             database_url: optional_env(env, "ORMPINDEXER_DATABASE_URL").map(SecretString::new),
             enabled_chains,
-            batch_size: optional_u64(env, "ORMPINDEXER_BATCH_SIZE")?.unwrap_or(1_000),
+            batch_size,
             start_block: start_block.unwrap_or(0),
             finality_mode: optional_env(env, "ORMPINDEXER_FINALITY_MODE")
                 .as_deref()
@@ -190,6 +217,16 @@ fn optional_u64(env: &BTreeMap<String, String>, key: &str) -> anyhow::Result<Opt
             value
                 .parse::<u64>()
                 .with_context(|| format!("parse {key} as u64"))
+        })
+        .transpose()
+}
+
+fn optional_bool(env: &BTreeMap<String, String>, key: &str) -> anyhow::Result<Option<bool>> {
+    optional_env(env, key)
+        .map(|value| match value.as_str() {
+            "true" | "1" | "yes" => Ok(true),
+            "false" | "0" | "no" => Ok(false),
+            _ => bail!("{key} must be true or false"),
         })
         .transpose()
 }
