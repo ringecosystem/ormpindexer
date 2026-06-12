@@ -30,6 +30,14 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
             "secret-token".to_owned(),
         ),
         (
+            "ORMPINDEXER_DATALENS_TIMEOUT_SECS".to_owned(),
+            "120".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS".to_owned(),
+            "5".to_owned(),
+        ),
+        (
             "ORMPINDEXER_DATABASE_URL".to_owned(),
             "postgres://user:pass@localhost/ormp".to_owned(),
         ),
@@ -70,6 +78,10 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
             "2000".to_owned(),
         ),
         (
+            "ORMPINDEXER_CHAIN_46_BATCH_SIZE".to_owned(),
+            "50".to_owned(),
+        ),
+        (
             "ORMPINDEXER_CHAIN_46_CONTRACTS".to_owned(),
             "0x333".to_owned(),
         ),
@@ -80,6 +92,8 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
     assert_eq!(config.datalens.endpoint, "https://datalens.example");
     assert_eq!(config.datalens.application, "ormp-production");
     assert!(config.datalens.token.is_some());
+    assert_eq!(config.datalens.timeout, Duration::from_secs(120));
+    assert_eq!(config.datalens.query_max_attempts, 5);
     assert!(config.database_url.is_some());
     assert_eq!(config.enabled_chains.len(), 2);
     assert_eq!(config.batch_size, 250);
@@ -99,6 +113,8 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
         vec!["0xaaa", "0xbbb"]
     );
     assert_eq!(config.chain(46).expect("chain 46").start_block, 2000);
+    assert_eq!(config.chain(1).expect("chain 1").batch_size, 250);
+    assert_eq!(config.chain(46).expect("chain 46").batch_size, 50);
 }
 
 #[test]
@@ -123,6 +139,106 @@ fn test_runtime_config_from_env_map_reads_warmup_defaults() {
     assert!(!config.warmup.required);
     assert_eq!(config.warmup.chunk_size, 250);
     assert_eq!(config.warmup.end_block, None);
+}
+
+#[test]
+fn test_runtime_config_reads_datalens_retry_defaults() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+    ]);
+
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+
+    assert_eq!(config.datalens.timeout, Duration::from_secs(300));
+    assert_eq!(config.datalens.query_max_attempts, 3);
+    assert_eq!(config.batch_size, 1_000);
+    assert_eq!(config.chain(46).expect("chain 46").batch_size, 1_000);
+}
+
+#[test]
+fn test_runtime_config_rejects_zero_chain_batch_size() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_CHAIN_46_BATCH_SIZE".to_owned(), "0".to_owned()),
+    ]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("zero chain batch size is invalid");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_CHAIN_46_BATCH_SIZE must be greater than zero")
+    );
+}
+
+#[test]
+fn test_runtime_config_rejects_zero_datalens_timeout() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        (
+            "ORMPINDEXER_DATALENS_TIMEOUT_SECS".to_owned(),
+            "0".to_owned(),
+        ),
+    ]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("zero timeout is invalid");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_DATALENS_TIMEOUT_SECS must be greater than zero")
+    );
+}
+
+#[test]
+fn test_runtime_config_rejects_zero_datalens_query_max_attempts() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        (
+            "ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS".to_owned(),
+            "0".to_owned(),
+        ),
+    ]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("zero attempts is invalid");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS must be greater than zero")
+    );
 }
 
 #[test]
@@ -220,7 +336,8 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
         event_signature: None,
         indexed_fields: Vec::new(),
         non_indexed_fields: None,
-    }]);
+    }])
+    .with_head(46, 14);
     let runner = IndexerRunner::new(
         config,
         reader,
@@ -264,7 +381,7 @@ async fn test_runner_empty_logs_still_advance_after_successful_query_and_write()
     let checkpoints = InMemoryCheckpointStore::default();
     let runner = IndexerRunner::new(
         config,
-        RecordingDatalensReader::new(Vec::new()),
+        RecordingDatalensReader::new(Vec::new()).with_head(46, 14),
         checkpoints.clone(),
         NoopDecoder,
         DryRunEventWriter,
@@ -344,6 +461,47 @@ async fn test_runner_caps_query_range_at_datalens_head() {
 }
 
 #[tokio::test]
+async fn test_runner_processes_contiguous_ranges_until_caught_up() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 22);
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("backlog pass succeeds");
+
+    assert_eq!(report.ranges_queried, 3);
+    assert_eq!(report.checkpoints_advanced, 3);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 23);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(10, 14), (15, 19), (20, 22)]
+    );
+}
+
+#[tokio::test]
 async fn test_runner_writer_failure_does_not_advance_checkpoint() {
     let env = BTreeMap::from([
         (
@@ -362,7 +520,9 @@ async fn test_runner_writer_failure_does_not_advance_checkpoint() {
     let checkpoints = InMemoryCheckpointStore::default();
     let runner = IndexerRunner::new(
         config,
-        RecordingDatalensReader::new(Vec::new()),
+        RecordingDatalensReader::new(Vec::new())
+            .with_head(1, 14)
+            .with_head(46, 24),
         checkpoints.clone(),
         NoopDecoder,
         FailingEventWriter,
@@ -405,7 +565,9 @@ async fn test_runner_reports_and_advances_multiple_chains() {
     let checkpoints = InMemoryCheckpointStore::default();
     let runner = IndexerRunner::new(
         config,
-        RecordingDatalensReader::new(Vec::new()),
+        RecordingDatalensReader::new(Vec::new())
+            .with_head(1, 14)
+            .with_head(46, 24),
         checkpoints.clone(),
         NoopDecoder,
         DryRunEventWriter,
@@ -455,7 +617,10 @@ async fn test_runner_slow_chain_does_not_block_other_chain_checkpoint_progress()
         .expect("seed fast chain checkpoint");
     let runner = IndexerRunner::new(
         config,
-        RecordingDatalensReader::new(Vec::new()).with_query_delay(1, Duration::from_millis(300)),
+        RecordingDatalensReader::new(Vec::new())
+            .with_head(1, 14)
+            .with_head(46, 14)
+            .with_query_delay(1, Duration::from_millis(300)),
         checkpoints.clone(),
         NoopDecoder,
         DryRunEventWriter,

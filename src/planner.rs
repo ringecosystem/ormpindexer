@@ -113,6 +113,7 @@ pub fn default_evm_chain_config(chain_id: u64) -> anyhow::Result<ChainConfig> {
     Ok(ChainConfig {
         chain_id,
         start_block: default.start_block,
+        batch_size: 1_000,
         contracts: default_contracts(default.include_signature_pub),
         topics: default_topics(default.include_signature_pub),
     })
@@ -131,6 +132,7 @@ pub fn default_tron_chain_config() -> anyhow::Result<ChainConfig> {
     Ok(ChainConfig {
         chain_id: TRON_CHAIN_ID,
         start_block: 0,
+        batch_size: 1_000,
         contracts: vec![
             TRON_MSGPORT_ADDRESS.to_owned(),
             TRON_ORMP_ADDRESS.to_owned(),

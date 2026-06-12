@@ -1,7 +1,7 @@
 use ormpindexer::{
     datalens::{
-        DatalensLog, evm_chain_name, logs_from_native_query_payload, native_graphql_request,
-        tron_chain_name,
+        DatalensFailureKind, DatalensLog, classify_datalens_failure_message, evm_chain_name,
+        logs_from_native_query_payload, native_graphql_request, tron_chain_name,
     },
     planner::TRON_CHAIN_ID,
 };
@@ -296,4 +296,40 @@ fn test_tron_chain_name_rejects_unknown_chain_ids() {
         "tron-mainnet"
     );
     assert!(tron_chain_name(46).is_err());
+}
+
+#[test]
+fn test_datalens_failure_classifies_provider_limits() {
+    assert_eq!(
+        classify_datalens_failure_message("query returns too many logs, narrow your filter"),
+        DatalensFailureKind::ProviderLimit
+    );
+    assert_eq!(
+        classify_datalens_failure_message("provider range limit exceeded"),
+        DatalensFailureKind::ProviderLimit
+    );
+}
+
+#[test]
+fn test_datalens_failure_classifies_transient_errors() {
+    assert_eq!(
+        classify_datalens_failure_message("ProviderFailure: upstream returned 502"),
+        DatalensFailureKind::Transient
+    );
+    assert_eq!(
+        classify_datalens_failure_message("request timed out after 300 seconds"),
+        DatalensFailureKind::Transient
+    );
+    assert_eq!(
+        classify_datalens_failure_message("rate-limit 429"),
+        DatalensFailureKind::Transient
+    );
+}
+
+#[test]
+fn test_datalens_failure_classifies_other_errors() {
+    assert_eq!(
+        classify_datalens_failure_message("permission denied"),
+        DatalensFailureKind::Other
+    );
 }
