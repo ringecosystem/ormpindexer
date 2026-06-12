@@ -240,7 +240,7 @@ pub fn evm_warmup_request(
             },
         },
         range_kind: WarmupRangeKind {
-            kind: config.finality_mode.as_str().to_owned(),
+            kind: "block".to_owned(),
         },
         start: start_block,
         end: config.warmup.end_block,

@@ -53,7 +53,7 @@ fn test_evm_warmup_request_uses_ormp_selector_and_checkpoint_start() {
                     "topics": [["0xaaa", "0xbbb"]]
                 }
             },
-            "range_kind": {"kind": "durable"},
+            "range_kind": {"kind": "block"},
             "start": 466386813,
             "end": null,
             "mode": "follow_query",
