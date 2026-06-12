@@ -50,8 +50,10 @@ where
 {
     pub async fn run_loop(&self) -> anyhow::Result<()> {
         loop {
-            self.run_once().await?;
-            sleep(self.config.poll_interval).await;
+            let report = self.run_once().await?;
+            if should_sleep_after_run(&report) {
+                sleep(self.config.poll_interval).await;
+            }
         }
     }
 
@@ -144,5 +146,29 @@ where
         }
 
         Ok(report)
+    }
+}
+
+fn should_sleep_after_run(report: &RunnerReport) -> bool {
+    report.ranges_queried == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_sleep_after_run_when_no_ranges_queried() {
+        assert!(should_sleep_after_run(&RunnerReport::default()));
+    }
+
+    #[test]
+    fn test_should_not_sleep_after_run_when_backlog_advanced() {
+        let report = RunnerReport {
+            ranges_queried: 1,
+            ..RunnerReport::default()
+        };
+
+        assert!(!should_sleep_after_run(&report));
     }
 }
