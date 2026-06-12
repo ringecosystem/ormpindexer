@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use tokio::time::sleep;
 
 use anyhow::Context;
@@ -41,10 +43,15 @@ struct ChainRunReport {
     records_decoded: u64,
     records_written: u64,
     checkpoints_advanced: u64,
+    caught_up: bool,
 }
 
 trait RunReport {
     fn ranges_queried(&self) -> u64;
+
+    fn should_sleep_after_run(&self) -> bool {
+        self.ranges_queried() == 0
+    }
 }
 
 impl RunReport for RunnerReport {
@@ -56,6 +63,10 @@ impl RunReport for RunnerReport {
 impl RunReport for ChainRunReport {
     fn ranges_queried(&self) -> u64 {
         self.ranges_queried
+    }
+
+    fn should_sleep_after_run(&self) -> bool {
+        self.caught_up || self.ranges_queried == 0
     }
 }
 
@@ -103,21 +114,27 @@ where
     }
 
     async fn run_chain_loop(&self, chain: ChainConfig) -> anyhow::Result<()> {
+        let mut consecutive_failures = 0;
         loop {
             match self.run_chain_once(chain.clone()).await {
                 Ok(report) => {
+                    consecutive_failures = 0;
                     if should_sleep_after_run(&report) {
                         sleep(self.config.poll_interval).await;
                     }
                 }
                 Err(error) => {
+                    consecutive_failures += 1;
+                    let backoff = failure_backoff(self.config.poll_interval, consecutive_failures);
                     log::error!(
-                        "ORMP Datalens chain pass failed chain_id={} start_block={} error={:#}",
+                        "ORMP Datalens chain pass failed chain_id={} start_block={} consecutive_failures={} backoff_ms={} error={:#}",
                         chain.chain_id,
                         chain.start_block,
+                        consecutive_failures,
+                        backoff.as_millis(),
                         error
                     );
-                    sleep(self.config.poll_interval).await;
+                    sleep(backoff).await;
                 }
             }
         }
@@ -142,7 +159,7 @@ where
 
     async fn run_chain_once(&self, chain: ChainConfig) -> anyhow::Result<ChainRunReport> {
         let dataset = chain_dataset(chain.chain_id)?;
-        let checkpoint = self
+        let mut checkpoint = self
             .checkpoints
             .read_or_create(chain.chain_id, dataset, chain.start_block)
             .await
@@ -165,98 +182,115 @@ where
                 checkpoint.next_block,
                 target_block,
             );
-            return Ok(ChainRunReport::default());
+            return Ok(ChainRunReport {
+                caught_up: true,
+                ..ChainRunReport::default()
+            });
         }
 
-        let mut range = plan_next_range(&checkpoint, self.config.batch_size).with_context(|| {
-            format!(
-                "plan ORMP checkpoint range chain_id={} dataset={} checkpoint_next_block={} batch_size={}",
-                chain.chain_id, dataset, checkpoint.next_block, self.config.batch_size
-            )
-        })?;
-        range.to_block = range.to_block.min(target_block);
-
-        log_query_start(&chain, dataset, range, target_block, &self.config);
-
-        let result = self
-            .reader
-            .query_logs(DatalensLogQuery {
-                chain_id: chain.chain_id,
-                from_block: range.from_block,
-                to_block: range.to_block,
-                contracts: chain.contracts.clone(),
-                topics: chain.topics.clone(),
-                finality_mode: self.config.finality_mode,
-            })
-            .await
-            .with_context(|| {
+        let mut report = ChainRunReport::default();
+        while checkpoint.next_block <= target_block {
+            let mut range = plan_next_range(&checkpoint, chain.batch_size).with_context(|| {
                 format!(
-                    "query ORMP Datalens logs chain_id={} dataset={} from_block={} to_block={}",
+                    "plan ORMP checkpoint range chain_id={} dataset={} checkpoint_next_block={} batch_size={}",
+                    chain.chain_id, dataset, checkpoint.next_block, chain.batch_size
+                )
+            })?;
+            range.to_block = range.to_block.min(target_block);
+
+            log_query_start(&chain, dataset, range, target_block, &self.config);
+
+            let batch_started = Instant::now();
+            let result = self
+                .reader
+                .query_logs(DatalensLogQuery {
+                    chain_id: chain.chain_id,
+                    from_block: range.from_block,
+                    to_block: range.to_block,
+                    contracts: chain.contracts.clone(),
+                    topics: chain.topics.clone(),
+                    finality_mode: self.config.finality_mode,
+                })
+                .await
+                .with_context(|| {
+                    format!(
+                        "query ORMP Datalens logs chain_id={} dataset={} from_block={} to_block={}",
+                        chain.chain_id, dataset, range.from_block, range.to_block
+                    )
+                })?;
+            let mut events = Vec::new();
+            for log in &result.logs {
+                let topic0 = log
+                    .topics
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("<missing>");
+                events.extend(self.decoder.decode(log).await.with_context(|| {
+                    format!(
+                        "decode ORMP Datalens log chain_id={} block_number={} transaction_hash={} log_index={} address={} topic0={}",
+                        log.chain_id,
+                        log.block_number,
+                        log.transaction_hash,
+                        log.log_index,
+                        log.address,
+                        topic0
+                    )
+                })?);
+            }
+            let written = self.writer.write_events(&events).await.with_context(|| {
+                format!(
+                    "write ORMP events chain_id={} dataset={} from_block={} to_block={}",
                     chain.chain_id, dataset, range.from_block, range.to_block
                 )
             })?;
-        let mut events = Vec::new();
-        for log in &result.logs {
-            let topic0 = log
-                .topics
-                .first()
-                .map(String::as_str)
-                .unwrap_or("<missing>");
-            events.extend(self.decoder.decode(log).await.with_context(|| {
+            let next_block = range.to_block.checked_add(1).with_context(|| {
                 format!(
-                    "decode ORMP Datalens log chain_id={} block_number={} transaction_hash={} log_index={} address={} topic0={}",
-                    log.chain_id,
-                    log.block_number,
-                    log.transaction_hash,
-                    log.log_index,
-                    log.address,
-                    topic0
-                )
-            })?);
-        }
-        let written = self.writer.write_events(&events).await.with_context(|| {
-            format!(
-                "write ORMP events chain_id={} dataset={} from_block={} to_block={}",
-                chain.chain_id, dataset, range.from_block, range.to_block
-            )
-        })?;
-        let next_block = range.to_block.checked_add(1).with_context(|| {
-            format!(
-                "ORMP checkpoint next block overflow chain_id={} dataset={} to_block={}",
-                chain.chain_id, dataset, range.to_block
-            )
-        })?;
-        self.checkpoints
-            .advance(chain.chain_id, dataset, next_block)
-            .await
-            .with_context(|| {
-                format!(
-                    "advance ORMP checkpoint chain_id={} dataset={} next_block={}",
-                    chain.chain_id, dataset, next_block
+                    "ORMP checkpoint next block overflow chain_id={} dataset={} to_block={}",
+                    chain.chain_id, dataset, range.to_block
                 )
             })?;
+            self.checkpoints
+                .advance(chain.chain_id, dataset, next_block)
+                .await
+                .with_context(|| {
+                    format!(
+                        "advance ORMP checkpoint chain_id={} dataset={} next_block={}",
+                        chain.chain_id, dataset, next_block
+                    )
+                })?;
 
-        log::info!(
-            "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true",
-            chain.chain_id,
-            dataset,
-            range.from_block,
-            range.to_block,
-            target_block,
-            result.logs.len(),
-            events.len(),
-            written,
-            next_block,
-        );
+            let progress = batch_progress(range, target_block, next_block, batch_started.elapsed());
+            log::info!(
+                "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true batch_blocks={} remaining_blocks={} batch_duration_ms={} current_rate_blocks_per_second={:.2} eta_seconds={}",
+                chain.chain_id,
+                dataset,
+                range.from_block,
+                range.to_block,
+                target_block,
+                result.logs.len(),
+                events.len(),
+                written,
+                next_block,
+                progress.batch_blocks,
+                progress.remaining_blocks,
+                progress.batch_duration_ms,
+                progress.current_rate_blocks_per_second,
+                progress.eta_seconds,
+            );
 
-        Ok(ChainRunReport {
-            chains_processed: 1,
-            ranges_queried: 1,
-            records_read: result.logs.len() as u64,
-            records_decoded: events.len() as u64,
-            records_written: written as u64,
-            checkpoints_advanced: 1,
-        })
+            report.ranges_queried += 1;
+            report.records_read += result.logs.len() as u64;
+            report.records_decoded += events.len() as u64;
+            report.records_written += written as u64;
+            report.checkpoints_advanced += 1;
+            checkpoint.next_block = next_block;
+        }
+
+        if report.ranges_queried > 0 {
+            report.chains_processed = 1;
+        }
+        report.caught_up = true;
+        Ok(report)
     }
 }
 
@@ -274,18 +308,65 @@ fn log_query_start(
         range.from_block,
         range.to_block,
         target_block,
-        config.batch_size,
+        chain.batch_size,
         chain.contracts.len(),
         chain.topics.len(),
         config.finality_mode.as_str(),
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BatchProgress {
+    batch_blocks: u64,
+    remaining_blocks: u64,
+    batch_duration_ms: u128,
+    current_rate_blocks_per_second: f64,
+    eta_seconds: u64,
+}
+
+fn batch_progress(
+    range: BlockRange,
+    target_block: u64,
+    next_block: u64,
+    duration: Duration,
+) -> BatchProgress {
+    let batch_blocks = range
+        .to_block
+        .saturating_sub(range.from_block)
+        .saturating_add(1);
+    let remaining_blocks = if next_block > target_block {
+        0
+    } else {
+        target_block.saturating_sub(next_block).saturating_add(1)
+    };
+    let elapsed_seconds = duration.as_secs_f64().max(0.001);
+    let current_rate_blocks_per_second = batch_blocks as f64 / elapsed_seconds;
+    let eta_seconds = if remaining_blocks == 0 {
+        0
+    } else {
+        (remaining_blocks as f64 / current_rate_blocks_per_second).ceil() as u64
+    };
+
+    BatchProgress {
+        batch_blocks,
+        remaining_blocks,
+        batch_duration_ms: duration.as_millis(),
+        current_rate_blocks_per_second,
+        eta_seconds,
+    }
+}
+
 fn should_sleep_after_run<R>(report: &R) -> bool
 where
     R: RunReport,
 {
-    report.ranges_queried() == 0
+    report.should_sleep_after_run()
+}
+
+fn failure_backoff(poll_interval: Duration, consecutive_failures: u64) -> Duration {
+    let multiplier = 1_u128 << consecutive_failures.saturating_sub(1).min(10);
+    let millis = poll_interval.as_millis().max(1).saturating_mul(multiplier);
+    Duration::from_millis(millis.min(60_000) as u64)
 }
 
 #[cfg(test)]
@@ -305,5 +386,23 @@ mod tests {
         };
 
         assert!(!should_sleep_after_run(&report));
+    }
+
+    #[test]
+    fn test_failure_backoff_grows_from_poll_interval_and_caps() {
+        let poll_interval = std::time::Duration::from_secs(2);
+
+        assert_eq!(
+            failure_backoff(poll_interval, 1),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            failure_backoff(poll_interval, 2),
+            std::time::Duration::from_secs(4)
+        );
+        assert_eq!(
+            failure_backoff(poll_interval, 6),
+            std::time::Duration::from_secs(60)
+        );
     }
 }

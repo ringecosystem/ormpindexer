@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::time::sleep;
 
 use anyhow::Context;
 
@@ -75,10 +76,11 @@ pub struct DatalensHttpClient {
 
 impl DatalensHttpClient {
     pub fn new(config: DatalensConfig) -> Self {
-        Self {
-            config,
-            http: reqwest::Client::new(),
-        }
+        let http = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .expect("build Datalens HTTP client");
+        Self { config, http }
     }
 
     fn native_graphql_endpoint(&self) -> String {
@@ -112,24 +114,106 @@ impl DatalensHttpClient {
         &self,
         request: DatalensWarmupSubmitRequest,
     ) -> anyhow::Result<WarmupSubmitResponse> {
-        let mut builder = self
-            .http
-            .post(self.warmup_tasks_endpoint())
-            .header("x-datalens-application", &self.config.application)
-            .json(&request);
-        if let Some(token) = &self.config.token {
-            builder = builder.bearer_auth(token.expose_secret());
-        }
-
-        let response = builder.send().await?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("Datalens warmup submit failed with status {status}: {body}");
-        }
+        let body = self
+            .request_text_with_retries(
+                "Datalens warmup submit",
+                || {
+                    let mut builder = self
+                        .http
+                        .post(self.warmup_tasks_endpoint())
+                        .header("x-datalens-application", &self.config.application)
+                        .json(&request);
+                    if let Some(token) = &self.config.token {
+                        builder = builder.bearer_auth(token.expose_secret());
+                    }
+                    builder
+                },
+                |_| false,
+            )
+            .await?;
 
         let payload: WarmupSubmitApiResponse = serde_json::from_str(&body)?;
         Ok(payload.into_submit_response())
+    }
+
+    async fn request_text_with_retries<B, G>(
+        &self,
+        operation: &str,
+        mut build_request: B,
+        should_retry_body: G,
+    ) -> anyhow::Result<String>
+    where
+        B: FnMut() -> reqwest::RequestBuilder,
+        G: Fn(&str) -> bool,
+    {
+        for attempt in 1..=self.config.query_max_attempts {
+            let response = match build_request().send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt < self.config.query_max_attempts {
+                        log::warn!(
+                            "{} send failed attempt={} max_attempts={} error={}",
+                            operation,
+                            attempt,
+                            self.config.query_max_attempts,
+                            error
+                        );
+                        sleep(datalens_retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(error).with_context(|| format!("{operation} send failed"));
+                }
+            };
+
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    if attempt < self.config.query_max_attempts {
+                        log::warn!(
+                            "{} body read failed attempt={} max_attempts={} error={}",
+                            operation,
+                            attempt,
+                            self.config.query_max_attempts,
+                            error
+                        );
+                        sleep(datalens_retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(error).with_context(|| format!("{operation} body read failed"));
+                }
+            };
+            if status.is_success() {
+                if should_retry_body(&body) && attempt < self.config.query_max_attempts {
+                    log::warn!(
+                        "{} returned retryable response attempt={} max_attempts={}",
+                        operation,
+                        attempt,
+                        self.config.query_max_attempts,
+                    );
+                    sleep(datalens_retry_delay(attempt)).await;
+                    continue;
+                }
+                return Ok(body);
+            }
+
+            if is_retryable_http_status(status) && attempt < self.config.query_max_attempts {
+                log::warn!(
+                    "{} failed with status {} attempt={} max_attempts={} body={}",
+                    operation,
+                    status,
+                    attempt,
+                    self.config.query_max_attempts,
+                    body
+                );
+                sleep(datalens_retry_delay(attempt)).await;
+                continue;
+            }
+
+            anyhow::bail!("{operation} failed with status {status}: {body}");
+        }
+
+        unreachable!("query_max_attempts is validated as greater than zero")
     }
 }
 
@@ -148,43 +232,49 @@ impl DatalensLogReader for DatalensHttpClient {
         chain_id: u64,
         finality_mode: FinalityMode,
     ) -> anyhow::Result<u64> {
-        let mut builder = self
-            .http
-            .get(self.chain_head_endpoint(chain_id, finality_mode)?)
-            .header("x-datalens-application", &self.config.application);
-        if let Some(token) = &self.config.token {
-            builder = builder.bearer_auth(token.expose_secret());
-        }
+        let endpoint = self.chain_head_endpoint(chain_id, finality_mode)?;
+        let body = self
+            .request_text_with_retries(
+                "Datalens chain head query",
+                || {
+                    let mut builder = self
+                        .http
+                        .get(&endpoint)
+                        .header("x-datalens-application", &self.config.application);
+                    if let Some(token) = &self.config.token {
+                        builder = builder.bearer_auth(token.expose_secret());
+                    }
+                    builder
+                },
+                |_| false,
+            )
+            .await?;
 
-        let response = builder.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Datalens chain head query failed with status {status}: {body}");
-        }
-
-        let payload: ChainHeadResponse = response.json().await?;
+        let payload: ChainHeadResponse = serde_json::from_str(&body)?;
         Ok(payload.height)
     }
 
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
         let request = native_graphql_request(&query)?;
-        let mut builder = self
-            .http
-            .post(self.native_graphql_endpoint())
-            .header("x-datalens-application", &self.config.application)
-            .json(&request);
-        if let Some(token) = &self.config.token {
-            builder = builder.bearer_auth(token.expose_secret());
-        }
-
-        let response = builder.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Datalens log query failed with status {status}: {body}");
-        }
-        let payload: serde_json::Value = response.json().await?;
+        let endpoint = self.native_graphql_endpoint();
+        let body = self
+            .request_text_with_retries(
+                "Datalens log query",
+                || {
+                    let mut builder = self
+                        .http
+                        .post(&endpoint)
+                        .header("x-datalens-application", &self.config.application)
+                        .json(&request);
+                    if let Some(token) = &self.config.token {
+                        builder = builder.bearer_auth(token.expose_secret());
+                    }
+                    builder
+                },
+                body_has_retryable_graphql_errors,
+            )
+            .await?;
+        let payload: serde_json::Value = serde_json::from_str(&body)?;
         if let Some(errors) = payload.get("errors") {
             anyhow::bail!("Datalens log query returned errors: {errors}");
         }
@@ -192,6 +282,102 @@ impl DatalensLogReader for DatalensHttpClient {
         let logs = logs_from_native_query_payload(&payload, query.chain_id)?;
         Ok(DatalensLogQueryResult { logs })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DatalensFailureKind {
+    ProviderLimit,
+    Transient,
+    Other,
+}
+
+pub fn classify_datalens_failure_message(message: &str) -> DatalensFailureKind {
+    let message = message.to_ascii_lowercase();
+    if message.contains("query returns too many logs")
+        || message.contains("too many logs")
+        || message.contains("narrow your filter")
+        || message.contains("provider limit")
+        || message.contains("range limit")
+        || message.contains("block range too large")
+        || message.contains("range too large")
+    {
+        return DatalensFailureKind::ProviderLimit;
+    }
+
+    if message.contains("timeout")
+        || message.contains("timed out")
+        || message.contains("provider_failure")
+        || message.contains("providerfailure")
+        || message.contains("rate-limit")
+        || message.contains("rate limit")
+        || message.contains("bad gateway")
+        || message.contains("service unavailable")
+        || message.contains("gateway timeout")
+    {
+        return DatalensFailureKind::Transient;
+    }
+
+    DatalensFailureKind::Other
+}
+
+fn body_has_retryable_graphql_errors(body: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(errors) = payload.get("errors") else {
+        return false;
+    };
+    errors
+        .as_array()
+        .map(|errors| errors.iter().any(graphql_error_is_retryable))
+        .unwrap_or_else(|| graphql_error_is_retryable(errors))
+}
+
+fn graphql_error_is_retryable(error: &serde_json::Value) -> bool {
+    if let Some(message) = error.get("message").and_then(serde_json::Value::as_str) {
+        if matches!(
+            classify_datalens_failure_message(message),
+            DatalensFailureKind::Transient
+        ) {
+            return true;
+        }
+    }
+
+    let Some(extensions) = error.get("extensions") else {
+        return false;
+    };
+
+    if let Some(code) = extensions.get("code").and_then(serde_json::Value::as_str) {
+        if matches!(
+            classify_datalens_failure_message(code),
+            DatalensFailureKind::Transient
+        ) {
+            return true;
+        }
+    }
+
+    ["status", "statusCode", "httpStatus"]
+        .iter()
+        .filter_map(|key| extensions.get(*key))
+        .any(retryable_status_value)
+}
+
+fn retryable_status_value(value: &serde_json::Value) -> bool {
+    let status = value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()));
+    matches!(status, Some(429 | 500..=599))
+}
+
+fn datalens_retry_delay(attempt: u64) -> std::time::Duration {
+    let millis = 250_u64.saturating_mul(1_u64 << attempt.saturating_sub(1).min(2));
+    std::time::Duration::from_millis(millis.min(1_000))
+}
+
+fn is_retryable_http_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+        || status.as_u16() == 524
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -553,4 +739,40 @@ pub fn tron_chain_name(chain_id: u64) -> anyhow::Result<&'static str> {
         TRON_CHAIN_ID => "tron-mainnet",
         _ => anyhow::bail!("unsupported Tron Datalens chain id: {chain_id}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_body_has_retryable_graphql_errors_checks_structured_status() {
+        let body = serde_json::json!({
+            "errors": [{
+                "message": "upstream provider failed",
+                "extensions": {
+                    "code": "PROVIDER_FAILURE",
+                    "status": 502
+                }
+            }]
+        })
+        .to_string();
+
+        assert!(body_has_retryable_graphql_errors(&body));
+    }
+
+    #[test]
+    fn test_body_has_retryable_graphql_errors_ignores_validation_numbers() {
+        let body = serde_json::json!({
+            "errors": [{
+                "message": "validation failed: limit must be at most 500",
+                "extensions": {
+                    "code": "BAD_USER_INPUT"
+                }
+            }]
+        })
+        .to_string();
+
+        assert!(!body_has_retryable_graphql_errors(&body));
+    }
 }

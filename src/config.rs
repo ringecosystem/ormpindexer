@@ -40,6 +40,10 @@ impl RuntimeConfig {
 
     pub fn from_env_map(env: &BTreeMap<String, String>) -> anyhow::Result<Self> {
         let start_block = optional_u64(env, "ORMPINDEXER_START_BLOCK")?;
+        let batch_size = optional_u64(env, "ORMPINDEXER_BATCH_SIZE")?.unwrap_or(1_000);
+        if batch_size == 0 {
+            bail!("ORMPINDEXER_BATCH_SIZE must be greater than zero");
+        }
         let chain_ids = required_list(env, "ORMPINDEXER_ENABLED_CHAINS")?
             .into_iter()
             .map(|value| {
@@ -51,17 +55,23 @@ impl RuntimeConfig {
 
         let enabled_chains = chain_ids
             .into_iter()
-            .map(|chain_id| ChainConfig::from_env_map(env, chain_id, start_block))
+            .map(|chain_id| ChainConfig::from_env_map(env, chain_id, start_block, batch_size))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let batch_size = optional_u64(env, "ORMPINDEXER_BATCH_SIZE")?.unwrap_or(1_000);
-        if batch_size == 0 {
-            bail!("ORMPINDEXER_BATCH_SIZE must be greater than zero");
-        }
         let warmup_chunk_size =
             optional_u64(env, "ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE")?.unwrap_or(batch_size);
         if warmup_chunk_size == 0 {
             bail!("ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE must be greater than zero");
+        }
+        let datalens_timeout_secs =
+            optional_u64(env, "ORMPINDEXER_DATALENS_TIMEOUT_SECS")?.unwrap_or(300);
+        if datalens_timeout_secs == 0 {
+            bail!("ORMPINDEXER_DATALENS_TIMEOUT_SECS must be greater than zero");
+        }
+        let datalens_query_max_attempts =
+            optional_u64(env, "ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS")?.unwrap_or(3);
+        if datalens_query_max_attempts == 0 {
+            bail!("ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS must be greater than zero");
         }
 
         Ok(Self {
@@ -71,6 +81,8 @@ impl RuntimeConfig {
                 application: optional_env(env, "ORMPINDEXER_DATALENS_APPLICATION")
                     .unwrap_or_else(|| "ormpindexer".to_owned()),
                 token: optional_env(env, "ORMPINDEXER_DATALENS_TOKEN").map(SecretString::new),
+                timeout: Duration::from_secs(datalens_timeout_secs),
+                query_max_attempts: datalens_query_max_attempts,
             },
             warmup: DatalensWarmupConfig {
                 enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?
@@ -112,12 +124,15 @@ pub struct DatalensConfig {
     pub endpoint: String,
     pub application: String,
     pub token: Option<SecretString>,
+    pub timeout: Duration,
+    pub query_max_attempts: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChainConfig {
     pub chain_id: u64,
     pub start_block: u64,
+    pub batch_size: u64,
     pub contracts: Vec<String>,
     pub topics: Vec<String>,
 }
@@ -127,6 +142,7 @@ impl ChainConfig {
         env: &BTreeMap<String, String>,
         chain_id: u64,
         default_start_block: Option<u64>,
+        default_batch_size: u64,
     ) -> anyhow::Result<Self> {
         let prefix = format!("ORMPINDEXER_CHAIN_{chain_id}");
         let default = default_chain_config(chain_id)?;
@@ -141,10 +157,16 @@ impl ChainConfig {
                 .or(default_start_block)
                 .unwrap_or(default.start_block)
         };
+        let batch_size =
+            optional_u64(env, &format!("{prefix}_BATCH_SIZE"))?.unwrap_or(default_batch_size);
+        if batch_size == 0 {
+            bail!("{prefix}_BATCH_SIZE must be greater than zero");
+        }
 
         Ok(Self {
             chain_id,
             start_block,
+            batch_size,
             contracts: if contracts.is_empty() {
                 default.contracts
             } else {
