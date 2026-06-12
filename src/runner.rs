@@ -104,9 +104,21 @@ where
 
     async fn run_chain_loop(&self, chain: ChainConfig) -> anyhow::Result<()> {
         loop {
-            let report = self.run_chain_once(chain.clone()).await?;
-            if should_sleep_after_run(&report) {
-                sleep(self.config.poll_interval).await;
+            match self.run_chain_once(chain.clone()).await {
+                Ok(report) => {
+                    if should_sleep_after_run(&report) {
+                        sleep(self.config.poll_interval).await;
+                    }
+                }
+                Err(error) => {
+                    log::error!(
+                        "ORMP Datalens chain pass failed chain_id={} start_block={} error={:#}",
+                        chain.chain_id,
+                        chain.start_block,
+                        error
+                    );
+                    sleep(self.config.poll_interval).await;
+                }
             }
         }
     }
