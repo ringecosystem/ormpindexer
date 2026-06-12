@@ -244,6 +244,32 @@ fn test_decode_native_graphql_log_preserves_metadata_in_legacy_row() {
 #[test]
 fn test_decode_evm_indexed_topics_preserves_legacy_fields() {
     let msg_hash = bytes32(0x44);
+    let hash_imported = DatalensLog {
+        topics: vec![ORMP_HASH_IMPORTED_TOPIC.to_owned(), address_topic(0x24)],
+        data: format!(
+            "0x{}",
+            hex::encode(encode(&[
+                Token::Uint(U256::from(46)),
+                Token::Address(address(0x21)),
+                Token::Uint(U256::from(7)),
+                Token::FixedBytes(msg_hash.clone()),
+            ]))
+        ),
+        ..log(ORMP_HASH_IMPORTED_TOPIC, ORMP_ADDRESS, Vec::new())
+    };
+    assert_eq!(
+        decode_evm_log(&hash_imported).expect("indexed HashImported decodes"),
+        LegacyOrmPEvent::HashImported {
+            metadata: metadata(ORMP_ADDRESS),
+            src_chain_id: 46,
+            target_chain_id: 1,
+            oracle: address_hex(0x24),
+            channel: address_hex(0x21),
+            msg_index: 7,
+            hash: bytes_hex(0x44),
+        }
+    );
+
     let accepted = DatalensLog {
         topics: vec![ORMP_MESSAGE_ACCEPTED_TOPIC.to_owned(), bytes_hex(0x44)],
         data: format!(
