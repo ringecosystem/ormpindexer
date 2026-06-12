@@ -502,6 +502,232 @@ async fn test_runner_processes_contiguous_ranges_until_caught_up() {
 }
 
 #[tokio::test]
+async fn test_runner_splits_retryable_datalens_range_failure_and_advances_children_in_order() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "4".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new())
+        .with_head(46, 13)
+        .with_range_query_failure(46, 10, 13, "provider_failure: upstream returned 524");
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("split batch succeeds");
+
+    assert_eq!(report.ranges_queried, 2);
+    assert_eq!(report.checkpoints_advanced, 2);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 14);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(10, 13), (10, 11), (12, 13)]
+    );
+}
+
+#[tokio::test]
+async fn test_runner_stops_checkpoint_at_retryable_single_block_failure_after_left_child_succeeds()
+{
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "4".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new())
+        .with_head(46, 13)
+        .with_range_query_failure(46, 10, 13, "provider_failure: upstream returned 524")
+        .with_range_query_failure(46, 12, 13, "provider range limit exceeded")
+        .with_range_query_failure(46, 12, 12, "provider_failure: upstream returned 524");
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let error = runner
+        .run_once()
+        .await
+        .expect_err("single block failure stops the chain pass");
+
+    let error_chain = format!("{error:#}");
+    assert!(error_chain.contains("from_block=12 to_block=12"));
+    assert!(error_chain.contains("provider_failure"));
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 12);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(10, 13), (10, 11), (12, 13), (12, 12)]
+    );
+}
+
+#[tokio::test]
+async fn test_runner_does_not_split_non_retryable_datalens_failure() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "4".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new())
+        .with_head(46, 13)
+        .with_range_query_failure(46, 10, 13, "permission denied");
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let error = runner
+        .run_once()
+        .await
+        .expect_err("non-retryable failure stops the chain pass");
+
+    assert!(format!("{error:#}").contains("permission denied"));
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(10, 13)]
+    );
+}
+
+#[tokio::test]
+async fn test_runner_does_not_split_downstream_timeout_failure() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "4".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 13);
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        FailingEventWriterWithMessage("database timeout"),
+    );
+
+    let error = runner
+        .run_once()
+        .await
+        .expect_err("downstream timeout failure stops without split");
+
+    assert!(format!("{error:#}").contains("database timeout"));
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(10, 13)]
+    );
+}
+
+#[tokio::test]
+async fn test_runner_does_not_split_generic_transient_datalens_failure() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "4".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new())
+        .with_head(46, 13)
+        .with_range_query_failure(46, 10, 13, "request timed out after 60 seconds");
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let error = runner
+        .run_once()
+        .await
+        .expect_err("generic transient failure stops without split");
+
+    assert!(format!("{error:#}").contains("request timed out"));
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(10, 13)]
+    );
+}
+
+#[tokio::test]
 async fn test_runner_writer_failure_does_not_advance_checkpoint() {
     let env = BTreeMap::from([
         (
@@ -709,6 +935,7 @@ struct RecordingDatalensReader {
     heads: BTreeMap<u64, u64>,
     query_delays: BTreeMap<u64, Duration>,
     query_failures: BTreeMap<u64, String>,
+    range_query_failures: BTreeMap<(u64, u64, u64), String>,
     queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
 }
 
@@ -719,6 +946,7 @@ impl RecordingDatalensReader {
             heads: BTreeMap::new(),
             query_delays: BTreeMap::new(),
             query_failures: BTreeMap::new(),
+            range_query_failures: BTreeMap::new(),
             queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -737,6 +965,18 @@ impl RecordingDatalensReader {
         self.query_failures.insert(chain_id, error.to_owned());
         self
     }
+
+    fn with_range_query_failure(
+        mut self,
+        chain_id: u64,
+        from_block: u64,
+        to_block: u64,
+        error: &str,
+    ) -> Self {
+        self.range_query_failures
+            .insert((chain_id, from_block, to_block), error.to_owned());
+        self
+    }
 }
 
 impl DatalensLogReader for RecordingDatalensReader {
@@ -752,10 +992,19 @@ impl DatalensLogReader for RecordingDatalensReader {
         if let Some(delay) = self.query_delays.get(&query.chain_id) {
             tokio::time::sleep(*delay).await;
         }
+        self.queries
+            .lock()
+            .expect("queries lock")
+            .push(query.clone());
+        if let Some(error) =
+            self.range_query_failures
+                .get(&(query.chain_id, query.from_block, query.to_block))
+        {
+            anyhow::bail!("{error}");
+        }
         if let Some(error) = self.query_failures.get(&query.chain_id) {
             anyhow::bail!("{error}");
         }
-        self.queries.lock().expect("queries lock").push(query);
         Ok(DatalensLogQueryResult {
             logs: self.logs.clone(),
         })
@@ -767,5 +1016,13 @@ struct FailingEventWriter;
 impl EventWriter for FailingEventWriter {
     async fn write_events(&self, _events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
         anyhow::bail!("write failed");
+    }
+}
+
+struct FailingEventWriterWithMessage(&'static str);
+
+impl EventWriter for FailingEventWriterWithMessage {
+    async fn write_events(&self, _events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
+        anyhow::bail!(self.0);
     }
 }
