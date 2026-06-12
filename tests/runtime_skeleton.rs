@@ -484,11 +484,66 @@ async fn test_runner_slow_chain_does_not_block_other_chain_checkpoint_progress()
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_runner_loop_recovers_chain_errors_without_blocking_other_chains() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "1,46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+        ("ORMPINDEXER_POLL_INTERVAL_SECS".to_owned(), "1".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    checkpoints
+        .read_or_create(1, "evm.logs", 10)
+        .await
+        .expect("seed failing chain checkpoint");
+    checkpoints
+        .read_or_create(46, "evm.logs", 10)
+        .await
+        .expect("seed healthy chain checkpoint");
+    let reader = RecordingDatalensReader::new(Vec::new())
+        .with_head(46, 14)
+        .with_query_failure(1, "provider failed");
+    let runner = IndexerRunner::new(
+        config,
+        reader,
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let run = tokio::spawn(async move { runner.run_loop().await });
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        if checkpoints.next_block(46, "evm.logs").await.unwrap() == 15 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "healthy chain checkpoint was not advanced while another chain failed"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    assert_eq!(checkpoints.next_block(1, "evm.logs").await.unwrap(), 10);
+    run.abort();
+}
+
 #[derive(Clone)]
 struct RecordingDatalensReader {
     logs: Vec<DatalensLog>,
     heads: BTreeMap<u64, u64>,
     query_delays: BTreeMap<u64, Duration>,
+    query_failures: BTreeMap<u64, String>,
     queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
 }
 
@@ -498,6 +553,7 @@ impl RecordingDatalensReader {
             logs,
             heads: BTreeMap::new(),
             query_delays: BTreeMap::new(),
+            query_failures: BTreeMap::new(),
             queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -509,6 +565,11 @@ impl RecordingDatalensReader {
 
     fn with_query_delay(mut self, chain_id: u64, delay: Duration) -> Self {
         self.query_delays.insert(chain_id, delay);
+        self
+    }
+
+    fn with_query_failure(mut self, chain_id: u64, error: &str) -> Self {
+        self.query_failures.insert(chain_id, error.to_owned());
         self
     }
 }
@@ -525,6 +586,9 @@ impl DatalensLogReader for RecordingDatalensReader {
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
         if let Some(delay) = self.query_delays.get(&query.chain_id) {
             tokio::time::sleep(*delay).await;
+        }
+        if let Some(error) = self.query_failures.get(&query.chain_id) {
+            anyhow::bail!("{error}");
         }
         self.queries.lock().expect("queries lock").push(query);
         Ok(DatalensLogQueryResult {
