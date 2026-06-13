@@ -77,8 +77,41 @@ fn test_assigned_backfills_accepted_when_configured_addresses_match() {
 
 #[test]
 fn test_msgport_sent_and_recv_preserve_event_metadata() {
+    let sent_metadata = ChainLogMetadata {
+        id: "42161-466386813-0x0f1e4961852aada25e6fda15c4883c7512e2f14c584e0d0917b03d9758682a57-14"
+            .to_owned(),
+        source: EventSource::Evm,
+        chain_id: 42161,
+        block_number: 466_386_813,
+        block_hash: Some(
+            "0x5bcb00ac00000000000000000000000000000000000000000000000000000000".to_owned(),
+        ),
+        block_timestamp: 456,
+        transaction_hash: "0x0f1e4961852aada25e6fda15c4883c7512e2f14c584e0d0917b03d9758682a57"
+            .to_owned(),
+        transaction_index: 2,
+        log_index: 14,
+        contract_address: "0xport".to_owned(),
+        transaction_from: Some("0xsender".to_owned()),
+    };
+    let recv_metadata = ChainLogMetadata {
+        id: "728126428-9989983-trontx6b95f-4".to_owned(),
+        source: EventSource::Tron,
+        chain_id: 728_126_428,
+        block_number: 9_989_983,
+        block_hash: Some(
+            "0x6b95f000000000000000000000000000000000000000000000000000000000000".to_owned(),
+        ),
+        block_timestamp: 654,
+        transaction_hash: "0x368465dbe681b2cbdd7d16e8de578f12b6e30cd604aef11a28f0fccbccae169a"
+            .to_owned(),
+        transaction_index: 9,
+        log_index: 4,
+        contract_address: "0xtronport".to_owned(),
+        transaction_from: None,
+    };
     let sent = MsgportMessageSentRow::from_event(LegacyOrmPEvent::MsgportMessageSent {
-        metadata: evm_metadata("sent-log"),
+        metadata: sent_metadata,
         msg_id: "0xmsgid".to_owned(),
         from_dapp: "0xfromdapp".to_owned(),
         to_chain_id: 728_126_428,
@@ -87,29 +120,47 @@ fn test_msgport_sent_and_recv_preserve_event_metadata() {
         params: "0xparams".to_owned(),
     });
     let recv = MsgportMessageRecvRow::from_event(LegacyOrmPEvent::MsgportMessageRecv {
-        metadata: tron_metadata("recv-log"),
+        metadata: recv_metadata,
         msg_id: "0xmsgid".to_owned(),
         result: true,
         return_data: "0xreturn".to_owned(),
     });
 
-    assert_eq!(sent.id, "sent-log");
+    assert_eq!(sent.id, "0466386813-5bcb0-000014");
     assert_eq!(sent.from_chain_id, sent.chain_id);
     assert_eq!(sent.transaction_index, 2);
-    assert_eq!(sent.log_index, 3);
+    assert_eq!(sent.log_index, 14);
     assert_eq!(sent.transaction_from.as_deref(), Some("0xsender"));
 
-    assert_eq!(recv.id, "recv-log");
+    assert_eq!(recv.id, "0009989983-6b95f-000004");
     assert_eq!(recv.transaction_index, 9);
-    assert_eq!(recv.log_index, 5);
+    assert_eq!(recv.log_index, 4);
     assert_eq!(recv.port_address, "0xtronport");
 }
 
 #[test]
-fn test_signature_submittion_uses_event_id_and_event_payload_fields() {
+fn test_signature_submittion_uses_legacy_event_id_and_event_payload_fields() {
     let row =
         SignaturePubSignatureSubmittionRow::from_event(LegacyOrmPEvent::SignatureSubmittion {
-            metadata: evm_metadata("sig-log"),
+            metadata: ChainLogMetadata {
+                id: "46-12054798-0x2a8dcfc8999ca0173b3e27b850e5cfe81d02f4ef6db4501221b384f88a46de65-1"
+                    .to_owned(),
+                source: EventSource::Evm,
+                chain_id: 46,
+                block_number: 12_054_798,
+                block_hash: Some(
+                    "0x6de65e4800000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+                ),
+                block_timestamp: 456,
+                transaction_hash:
+                    "0x2a8dcfc8999ca0173b3e27b850e5cfe81d02f4ef6db4501221b384f88a4bd947"
+                        .to_owned(),
+                transaction_index: 2,
+                log_index: 1,
+                contract_address: "0xport".to_owned(),
+                transaction_from: Some("0xsender".to_owned()),
+            },
             chain_id: 46,
             channel: "0xchannel".to_owned(),
             signer: "0xsigner".to_owned(),
@@ -118,9 +169,12 @@ fn test_signature_submittion_uses_event_id_and_event_payload_fields() {
             data: "0xdata".to_owned(),
         });
 
-    assert_eq!(row.id, "sig-log");
-    assert_eq!(row.block_number, 123);
-    assert_eq!(row.transaction_hash, "0xtx");
+    assert_eq!(row.id, "0012054798-6de65-000001");
+    assert_eq!(row.block_number, 12_054_798);
+    assert_eq!(
+        row.transaction_hash,
+        "0x2a8dcfc8999ca0173b3e27b850e5cfe81d02f4ef6db4501221b384f88a4bd947"
+    );
     assert_eq!(row.chain_id, 46);
     assert_eq!(row.msg_index, 99);
     assert_eq!(row.signature, "0xsig");
@@ -173,26 +227,12 @@ fn evm_metadata(id: &str) -> ChainLogMetadata {
         source: EventSource::Evm,
         chain_id: 46,
         block_number: 123,
+        block_hash: None,
         block_timestamp: 456,
         transaction_hash: "0xtx".to_owned(),
         transaction_index: 2,
         log_index: 3,
         contract_address: "0xport".to_owned(),
         transaction_from: Some("0xsender".to_owned()),
-    }
-}
-
-fn tron_metadata(id: &str) -> ChainLogMetadata {
-    ChainLogMetadata {
-        id: id.to_owned(),
-        source: EventSource::Tron,
-        chain_id: 728_126_428,
-        block_number: 987,
-        block_timestamp: 654,
-        transaction_hash: "0xtrontx".to_owned(),
-        transaction_index: 9,
-        log_index: 5,
-        contract_address: "0xtronport".to_owned(),
-        transaction_from: None,
     }
 }

@@ -202,6 +202,7 @@ fn test_decode_native_graphql_log_preserves_metadata_in_legacy_row() {
         "id": "46-888-7",
         "chainId": 46,
         "blockNumber": 888,
+        "blockHash": "0x6de65e4800000000000000000000000000000000000000000000000000000000",
         "blockTimestamp": 1_800_000_000_000_u64,
         "transactionHash": bytes_hex(0xaa).to_ascii_uppercase(),
         "transactionIndex": 9,
@@ -225,7 +226,7 @@ fn test_decode_native_graphql_log_preserves_metadata_in_legacy_row() {
 
     let row = MsgportMessageSentRow::from_event(decode_evm_log(&log).expect("decode EVM event"));
 
-    assert_eq!(row.id, "46-888-7");
+    assert_eq!(row.id, "0000000888-6de65-000007");
     assert_eq!(row.chain_id, 46);
     assert_eq!(row.block_number, 888);
     assert_eq!(row.block_timestamp, 1_800_000_000_000);
@@ -448,6 +449,7 @@ fn log(topic: &str, address: &str, data: Vec<u8>) -> DatalensLog {
         id: Some("1-100-0".to_owned()),
         chain_id: 1,
         block_number: 100,
+        block_hash: None,
         block_timestamp: Some(1_700_000_000_000),
         transaction_hash: bytes_hex(0xaa),
         transaction_index: Some(2),
@@ -469,6 +471,7 @@ fn metadata(address: &str) -> ormpindexer::schema::ChainLogMetadata {
         source: EventSource::Evm,
         chain_id: 1,
         block_number: 100,
+        block_hash: None,
         block_timestamp: 1_700_000_000_000,
         transaction_hash: bytes_hex(0xaa),
         transaction_index: 2,

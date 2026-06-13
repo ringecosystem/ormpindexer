@@ -192,7 +192,7 @@ fn evm_expected_rows() -> Vec<CompatibilityRow> {
             dispatch_result: true,
         }),
         CompatibilityRow::MsgportMessageRecv(MsgportMessageRecvRow {
-            id: "1-104-7".to_owned(),
+            id: "0000000104-eeeee-000007".to_owned(),
             block_number: 104,
             transaction_hash: bytes_hex(0xee),
             block_timestamp: 1_700_000_000_004,
@@ -205,7 +205,7 @@ fn evm_expected_rows() -> Vec<CompatibilityRow> {
             return_data: "0xff".to_owned(),
         }),
         CompatibilityRow::MsgportMessageSent(MsgportMessageSentRow {
-            id: "1-105-8".to_owned(),
+            id: "0000000105-efefe-000008".to_owned(),
             block_number: 105,
             transaction_hash: bytes_hex(0xef),
             block_timestamp: 1_700_000_000_005,
@@ -223,7 +223,7 @@ fn evm_expected_rows() -> Vec<CompatibilityRow> {
             params: "0xbbcc".to_owned(),
         }),
         CompatibilityRow::SignatureSubmittion(SignaturePubSignatureSubmittionRow {
-            id: "1-106-9".to_owned(),
+            id: "0000000106-f0f0f-000009".to_owned(),
             block_number: 106,
             transaction_hash: bytes_hex(0xf0),
             block_timestamp: 1_700_000_000_006,
@@ -306,7 +306,7 @@ fn tron_expected_rows() -> Vec<CompatibilityRow> {
             dispatch_result: true,
         }),
         CompatibilityRow::MsgportMessageRecv(MsgportMessageRecvRow {
-            id: "728126428-124-tron-message-recv-7".to_owned(),
+            id: "0000000124-tron--000007".to_owned(),
             block_number: 124,
             transaction_hash: "tron-message-recv".to_owned(),
             block_timestamp: 456_004,
@@ -319,7 +319,7 @@ fn tron_expected_rows() -> Vec<CompatibilityRow> {
             return_data: "0xff".to_owned(),
         }),
         CompatibilityRow::MsgportMessageSent(MsgportMessageSentRow {
-            id: "728126428-123-trontx-3".to_owned(),
+            id: "0000000123-tront-000003".to_owned(),
             block_number: 123,
             transaction_hash: "trontx".to_owned(),
             block_timestamp: 456,
@@ -337,7 +337,7 @@ fn tron_expected_rows() -> Vec<CompatibilityRow> {
             params: "0xbbcc".to_owned(),
         }),
         CompatibilityRow::SignatureSubmittion(SignaturePubSignatureSubmittionRow {
-            id: "728126428-126-tron-signature-submittion-9".to_owned(),
+            id: "0000000126-tron--000009".to_owned(),
             block_number: 126,
             transaction_hash: "tron-signature-submittion".to_owned(),
             block_timestamp: 456_006,
@@ -574,6 +574,7 @@ fn tron_fixture_logs() -> Vec<DatalensLog> {
             "id": "728126428-123-trontx-3",
             "chainId": TRON_CHAIN_ID,
             "blockNumber": 123,
+            "blockHash": "trontx",
             "blockTimestamp": 456,
             "transactionHash": "trontx",
             "transactionIndex": 2,
@@ -626,6 +627,7 @@ fn tron_log(
         "id": id,
         "chainId": TRON_CHAIN_ID,
         "blockNumber": block_number,
+        "blockHash": transaction_hash,
         "blockTimestamp": 456_000 + block_number - 120,
         "transactionHash": transaction_hash,
         "transactionIndex": transaction_index,
@@ -655,6 +657,7 @@ fn evm_log(
         id: Some(id.to_owned()),
         chain_id: 1,
         block_number,
+        block_hash: Some(transaction_hash.clone()),
         block_timestamp: Some(1_700_000_000_000 + block_number - 100),
         transaction_hash,
         transaction_index: Some(transaction_index),

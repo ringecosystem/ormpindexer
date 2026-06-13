@@ -200,6 +200,7 @@ fn evm_metadata(id: &str) -> ChainLogMetadata {
         source: EventSource::Evm,
         chain_id: 46,
         block_number: 123,
+        block_hash: None,
         block_timestamp: 456,
         transaction_hash: "0xtx".to_owned(),
         transaction_index: 2,

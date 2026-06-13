@@ -74,6 +74,7 @@ fn evm_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
         source: EventSource::Evm,
         chain_id: log.chain_id.into(),
         block_number: log.block_number.into(),
+        block_hash: log.block_hash.clone(),
         block_timestamp: log
             .block_timestamp
             .context("EVM log is missing block timestamp")?
@@ -128,6 +129,7 @@ fn tron_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
         source: EventSource::Tron,
         chain_id: log.chain_id.into(),
         block_number: log.block_number.into(),
+        block_hash: log.block_hash.clone(),
         block_timestamp: log
             .block_timestamp
             .context("Tron event is missing block timestamp")?

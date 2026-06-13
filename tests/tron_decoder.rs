@@ -11,6 +11,7 @@ fn test_decode_tron_message_sent_preserves_legacy_fields() {
         "id": "728126428-123-trontx-3",
         "chainId": TRON_CHAIN_ID,
         "blockNumber": 123,
+        "blockHash": "0x9c64f37100000000000000000000000000000000000000000000000000000000",
         "blockTimestamp": 456,
         "transactionHash": "trontx",
         "transactionIndex": 2,
@@ -42,6 +43,9 @@ fn test_decode_tron_message_sent_preserves_legacy_fields() {
                 source: EventSource::Tron,
                 chain_id: TRON_CHAIN_ID.into(),
                 block_number: 123,
+                block_hash: Some(
+                    "0x9c64f37100000000000000000000000000000000000000000000000000000000".to_owned(),
+                ),
                 block_timestamp: 456,
                 transaction_hash: "trontx".to_owned(),
                 transaction_index: 2,
@@ -59,6 +63,7 @@ fn test_decode_tron_message_sent_preserves_legacy_fields() {
     );
 
     let row = MsgportMessageSentRow::from_event(event);
+    assert_eq!(row.id, "0000000123-9c64f-000003");
     assert_eq!(row.chain_id, TRON_CHAIN_ID.into());
     assert_eq!(row.from_chain_id, TRON_CHAIN_ID.into());
     assert_eq!(row.transaction_from, None);
@@ -112,6 +117,7 @@ fn tron_log() -> DatalensLog {
         id: Some("728126428-123-trontx-3".to_owned()),
         chain_id: TRON_CHAIN_ID,
         block_number: 123,
+        block_hash: None,
         block_timestamp: Some(456),
         transaction_hash: "trontx".to_owned(),
         transaction_index: Some(2),
