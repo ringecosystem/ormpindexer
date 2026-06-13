@@ -756,7 +756,7 @@ fn tron_event_selector(
 
     Ok(json!({
         "kind": "tron_events",
-        "fingerprint": format!("tron-events/ormp-v2/{}", digest_prefix(&canonical_key, 12)),
+        "fingerprint": format!("tron-events/ormp-v3/{}", digest_prefix(&canonical_key, 12)),
         "canonicalKey": canonical_key,
     }))
 }
