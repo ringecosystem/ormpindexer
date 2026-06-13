@@ -1,11 +1,13 @@
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     checkpoint::CheckpointStore,
     config::{ChainConfig, RuntimeConfig},
-    datalens::evm_chain_name,
-    planner::{EVM_LOGS_DATASET, TRON_CHAIN_ID, chain_dataset},
+    datalens::{evm_chain_name, tron_chain_name},
+    planner::{EVM_LOGS_DATASET, TRON_EVENTS_DATASET, chain_dataset},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,7 +65,7 @@ pub struct WarmupNetworkId {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WarmupSelector {
     pub kind: String,
-    pub value: WarmupEvmLogsSelector,
+    pub value: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -148,9 +150,9 @@ where
     let mut outcomes = Vec::new();
     for chain in &config.enabled_chains {
         let dataset = chain_dataset(chain.chain_id)?;
-        if chain.chain_id == TRON_CHAIN_ID || dataset != EVM_LOGS_DATASET {
+        if dataset != EVM_LOGS_DATASET && dataset != TRON_EVENTS_DATASET {
             log::info!(
-                "skipping Datalens follow_query warmup for non-EVM chain_id={} dataset={}",
+                "skipping Datalens follow_query warmup for unsupported dataset chain_id={} dataset={}",
                 chain.chain_id,
                 dataset
             );
@@ -164,7 +166,7 @@ where
         let checkpoint = checkpoints
             .read_or_create(chain.chain_id, dataset, chain.start_block)
             .await?;
-        let request = evm_warmup_request(config, chain, checkpoint.next_block)?;
+        let request = warmup_request(config, chain, dataset, checkpoint.next_block)?;
         match ensurer.ensure_warmup_task(request).await {
             Ok(response) => {
                 log::info!(
@@ -208,6 +210,19 @@ where
     Ok(outcomes)
 }
 
+pub fn warmup_request(
+    config: &RuntimeConfig,
+    chain: &ChainConfig,
+    dataset: &str,
+    start_block: u64,
+) -> anyhow::Result<DatalensWarmupSubmitRequest> {
+    match dataset {
+        EVM_LOGS_DATASET => evm_warmup_request(config, chain, start_block),
+        TRON_EVENTS_DATASET => tron_warmup_request(config, chain, start_block),
+        _ => anyhow::bail!("unsupported Datalens warmup dataset: {dataset}"),
+    }
+}
+
 pub fn evm_warmup_request(
     config: &RuntimeConfig,
     chain: &ChainConfig,
@@ -234,10 +249,10 @@ pub fn evm_warmup_request(
         dataset_key: EVM_LOGS_DATASET.to_owned(),
         selector: WarmupSelector {
             kind: "evm_logs".to_owned(),
-            value: WarmupEvmLogsSelector {
+            value: json!(WarmupEvmLogsSelector {
                 addresses: chain.contracts.clone(),
                 topics: vec![chain.topics.clone()],
-            },
+            }),
         },
         range_kind: WarmupRangeKind {
             kind: "block".to_owned(),
@@ -249,4 +264,119 @@ pub fn evm_warmup_request(
             max_range_len: config.warmup.chunk_size,
         },
     })
+}
+
+pub fn tron_warmup_request(
+    config: &RuntimeConfig,
+    chain: &ChainConfig,
+    start_block: u64,
+) -> anyhow::Result<DatalensWarmupSubmitRequest> {
+    ensure!(
+        !chain.contracts.is_empty(),
+        "Datalens warmup selector requires at least one Tron contract address"
+    );
+    ensure!(
+        !chain.topics.is_empty(),
+        "Datalens warmup selector requires at least one Tron event name"
+    );
+
+    let selector = tron_event_selector(&chain.contracts, &chain.topics)?;
+    Ok(DatalensWarmupSubmitRequest {
+        chain: WarmupChainIdentity {
+            family: "Other".to_owned(),
+            configured_name: tron_chain_name(chain.chain_id)?.to_owned(),
+            network_id: WarmupNetworkId {
+                kind: "numeric".to_owned(),
+                value: chain.chain_id,
+            },
+        },
+        dataset_key: TRON_EVENTS_DATASET.to_owned(),
+        selector: WarmupSelector {
+            kind: "other".to_owned(),
+            value: selector,
+        },
+        range_kind: WarmupRangeKind {
+            kind: "block".to_owned(),
+        },
+        start: start_block,
+        end: config.warmup.end_block,
+        mode: "follow_query".to_owned(),
+        chunk_policy: WarmupChunkPolicy {
+            max_range_len: config.warmup.chunk_size,
+        },
+    })
+}
+
+fn tron_event_selector(
+    contracts: &[String],
+    event_names: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    let mut contracts = contracts
+        .iter()
+        .map(|address| normalize_tron_contract_address(address))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    contracts.sort();
+    contracts.dedup();
+
+    let mut event_names = event_names
+        .iter()
+        .map(|name| normalize_tron_event_name(name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    event_names.sort();
+    event_names.dedup();
+
+    let canonical_key = format!(
+        "contracts/{}/events/{}",
+        contracts.join("+"),
+        if event_names.is_empty() {
+            "all".to_owned()
+        } else {
+            event_names.join("+")
+        }
+    );
+
+    Ok(json!({
+        "kind": "tron_events",
+        "fingerprint": format!("tron-events/{}", digest_prefix(&canonical_key, 12)),
+        "canonical_key": canonical_key,
+    }))
+}
+
+fn normalize_tron_contract_address(address: &str) -> anyhow::Result<String> {
+    let address = address.trim();
+    let hex = address.strip_prefix("0x").unwrap_or(address);
+    if hex.len() == 40 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(format!("41{}", hex.to_ascii_lowercase()));
+    }
+    if hex.len() == 42 && hex.starts_with("41") && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Ok(hex.to_ascii_lowercase());
+    }
+    if address.len() == 34
+        && address.starts_with('T')
+        && address.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Ok(address.to_owned());
+    }
+
+    anyhow::bail!("Tron contract address must be hex, 41-prefixed hex, or base58")
+}
+
+fn normalize_tron_event_name(name: &str) -> anyhow::Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        anyhow::bail!("Tron event name must be a non-empty identifier");
+    }
+    Ok(name.to_owned())
+}
+
+fn digest_prefix(value: &str, bytes: usize) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex::encode(&digest[..bytes])
 }

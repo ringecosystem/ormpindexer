@@ -5,7 +5,7 @@ use ormpindexer::{
     config::{FinalityMode, RuntimeConfig},
     warmup::{
         DatalensWarmupEnsureOutcome, DatalensWarmupEnsurer, DatalensWarmupSubmitRequest,
-        WarmupSubmitResponse, ensure_startup_warmup, evm_warmup_request,
+        WarmupSubmitResponse, ensure_startup_warmup, evm_warmup_request, tron_warmup_request,
     },
 };
 
@@ -62,6 +62,59 @@ fn test_evm_warmup_request_uses_ormp_selector_and_checkpoint_start() {
     );
 }
 
+#[test]
+fn test_tron_warmup_request_uses_ormp_selector_and_checkpoint_start() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
+            "728126428".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_CHAIN_728126428_START_BLOCK".to_owned(),
+            "100".to_owned(),
+        ),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5000".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let chain = config.chain(728_126_428).expect("Tron chain");
+
+    let request = tron_warmup_request(&config, chain, 68_291_337).expect("build request");
+    let value = serde_json::to_value(request).expect("serialize request");
+
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "chain": {
+                "family": "Other",
+                "configured_name": "tron-mainnet",
+                "network_id": {"kind": "numeric", "value": 728126428}
+            },
+            "dataset_key": "tron.events",
+            "selector": {
+                "kind": "other",
+                "value": {
+                    "kind": "tron_events",
+                    "fingerprint": "tron-events/47bf6bd754c8e9955438fdc7",
+                    "canonical_key": "contracts/4113b2211a7ca45db2808f6db05557ce5347e3634e+412cd1867fb8016f93710b6386f7f9f1d540a60812+4157aa601a0377f5ab313c5a955ee874f5d495fc92/events/HashImported+MessageAccepted+MessageAssigned+MessageDispatched+MessageRecv+MessageSent+SignatureSubmittion"
+                }
+            },
+            "range_kind": {"kind": "block"},
+            "start": 68291337,
+            "end": null,
+            "mode": "follow_query",
+            "chunk_policy": {"max_range_len": 5000}
+        })
+    );
+}
+
 #[tokio::test]
 async fn test_startup_warmup_failure_continues_when_not_required() {
     let config = warmup_config(false);
@@ -95,7 +148,7 @@ async fn test_startup_warmup_failure_fails_when_required() {
 }
 
 #[tokio::test]
-async fn test_startup_warmup_skips_tron() {
+async fn test_startup_warmup_submits_tron() {
     let env = BTreeMap::from([
         (
             "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
@@ -127,16 +180,19 @@ async fn test_startup_warmup_skips_tron() {
 
     let outcomes = ensure_startup_warmup(&config, &checkpoints, &ensurer)
         .await
-        .expect("Tron warmup skips");
+        .expect("Tron warmup submits");
 
     assert_eq!(
         outcomes,
-        vec![DatalensWarmupEnsureOutcome::SkippedNonEvm {
+        vec![DatalensWarmupEnsureOutcome::Submitted {
             chain_id: 728_126_428,
-            dataset: "tron.events".to_owned()
+            task_id: "unused".to_owned(),
+            created: true
         }]
     );
-    assert!(ensurer.requests.borrow().is_empty());
+    assert_eq!(ensurer.requests.borrow().len(), 1);
+    assert_eq!(ensurer.requests.borrow()[0].dataset_key, "tron.events");
+    assert_eq!(ensurer.requests.borrow()[0].selector.kind, "other");
 }
 
 fn warmup_config(required: bool) -> RuntimeConfig {
