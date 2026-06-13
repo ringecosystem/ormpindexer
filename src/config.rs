@@ -75,6 +75,8 @@ impl RuntimeConfig {
         }
         let datalens_head_buffer_blocks =
             optional_u64(env, "ORMPINDEXER_DATALENS_HEAD_BUFFER_BLOCKS")?.unwrap_or(1);
+        let datalens_min_request_interval_ms =
+            optional_u64(env, "ORMPINDEXER_DATALENS_MIN_REQUEST_INTERVAL_MS")?.unwrap_or(100);
 
         Ok(Self {
             datalens: DatalensConfig {
@@ -86,6 +88,7 @@ impl RuntimeConfig {
                 timeout: Duration::from_secs(datalens_timeout_secs),
                 query_max_attempts: datalens_query_max_attempts,
                 head_buffer_blocks: datalens_head_buffer_blocks,
+                min_request_interval: Duration::from_millis(datalens_min_request_interval_ms),
             },
             warmup: DatalensWarmupConfig {
                 enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?
@@ -130,6 +133,7 @@ pub struct DatalensConfig {
     pub timeout: Duration,
     pub query_max_attempts: u64,
     pub head_buffer_blocks: u64,
+    pub min_request_interval: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
