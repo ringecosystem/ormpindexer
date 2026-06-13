@@ -240,7 +240,7 @@ fn test_tron_native_graphql_request_uses_other_selector_shape() {
     );
     assert_eq!(
         input["selector"]["other"]["fingerprint"],
-        "tron-events/ormp-v2/2edc7c1723a90acd0d3d37c0"
+        "tron-events/ormp-v3/2edc7c1723a90acd0d3d37c0"
     );
     assert_eq!(
         input["range"],
