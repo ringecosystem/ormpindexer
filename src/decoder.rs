@@ -99,10 +99,16 @@ pub fn decode_tron_event(log: &DatalensLog) -> anyhow::Result<LegacyOrmPEvent> {
         .as_deref()
         .context("Tron event is missing event_name")?;
     let metadata = tron_metadata(log)?;
-    let fields = log
+    let payload = log
         .non_indexed_fields
         .as_ref()
-        .context("Tron event is missing non_indexed_fields")?
+        .context("Tron event is missing non_indexed_fields")?;
+
+    if let Some(data) = payload.as_str() {
+        return decode_tron_raw_event(metadata, event_name, log, data);
+    }
+
+    let fields = payload
         .as_object()
         .context("Tron event payload must be an object")?;
 
@@ -118,6 +124,47 @@ pub fn decode_tron_event(log: &DatalensLog) -> anyhow::Result<LegacyOrmPEvent> {
         }
         _ => bail!("unsupported ORMP Tron event name {event_name}"),
     }
+}
+
+fn decode_tron_raw_event(
+    metadata: ChainLogMetadata,
+    event_name: &str,
+    log: &DatalensLog,
+    data: &str,
+) -> anyhow::Result<LegacyOrmPEvent> {
+    let topics = tron_raw_topics(log)?;
+    let data = decode_hex(data).context("decode Tron raw event data")?;
+
+    match event_name {
+        TRON_HASH_IMPORTED_EVENT => decode_hash_imported(metadata, &topics, &data),
+        TRON_MESSAGE_ACCEPTED_EVENT => decode_message_accepted(metadata, &topics, &data),
+        TRON_MESSAGE_ASSIGNED_EVENT => decode_message_assigned(metadata, &topics, &data),
+        TRON_MESSAGE_DISPATCHED_EVENT => decode_message_dispatched(metadata, &topics, &data),
+        TRON_MESSAGE_RECV_EVENT => decode_msgport_message_recv(metadata, &topics, &data),
+        TRON_MESSAGE_SENT_EVENT => decode_msgport_message_sent(metadata, &topics, &data),
+        TRON_SIGNATURE_SUBMITTION_EVENT | "SignatureSubmission" => {
+            decode_signature_submittion(metadata, &topics, &data)
+        }
+        _ => bail!("unsupported ORMP Tron event name {event_name}"),
+    }
+}
+
+fn tron_raw_topics(log: &DatalensLog) -> anyhow::Result<Vec<String>> {
+    if !log.indexed_fields.is_empty() {
+        return log
+            .indexed_fields
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .with_context(|| format!("Tron indexed field {index} must be a hex string"))
+            })
+            .collect();
+    }
+
+    Ok(log.topics.clone())
 }
 
 fn tron_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
