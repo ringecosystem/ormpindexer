@@ -1,7 +1,11 @@
+use ethabi::{
+    Token, encode,
+    ethereum_types::{H160, U256},
+};
 use ormpindexer::{
     datalens::DatalensLog,
     decoder::decode_tron_event,
-    planner::TRON_CHAIN_ID,
+    planner::{ORMP_MESSAGE_ACCEPTED_TOPIC, TRON_CHAIN_ID},
     schema::{EventSource, LegacyOrmPEvent, MsgportMessageSentRow},
 };
 
@@ -74,6 +78,80 @@ fn test_decode_tron_message_sent_preserves_legacy_fields() {
 }
 
 #[test]
+fn test_decode_tron_raw_message_accepted_from_block_scan_fields() {
+    let log = DatalensLog {
+        id: Some("62254349-0xtrontx-7".to_owned()),
+        chain_id: TRON_CHAIN_ID,
+        block_number: 62_254_349,
+        block_hash: Some(
+            "0x9c64f37100000000000000000000000000000000000000000000000000000000".to_owned(),
+        ),
+        block_timestamp: Some(1_800_000_000_000),
+        transaction_hash: "trontx".to_owned(),
+        transaction_index: Some(4),
+        log_index: 7,
+        address: "415c5c383febe62f377f8c0ea1de97f2a2ba102e98".to_owned(),
+        transaction_from: Some("41ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_owned()),
+        topics: Vec::new(),
+        data: "0x".to_owned(),
+        event_name: Some("MessageAccepted".to_owned()),
+        event_signature: Some(
+            ORMP_MESSAGE_ACCEPTED_TOPIC
+                .trim_start_matches("0x")
+                .to_owned(),
+        ),
+        indexed_fields: vec![
+            serde_json::json!(ORMP_MESSAGE_ACCEPTED_TOPIC.trim_start_matches("0x")),
+            serde_json::json!(bytes_hex(0x11).trim_start_matches("0x")),
+        ],
+        non_indexed_fields: Some(serde_json::json!(hex::encode(encode(&[Token::Tuple(
+            vec![
+                Token::Address(address(0x21)),
+                Token::Uint(U256::from(8)),
+                Token::Uint(U256::from(46)),
+                Token::Address(address(0x22)),
+                Token::Uint(U256::from(137)),
+                Token::Address(address(0x23)),
+                Token::Uint(U256::from(500_000)),
+                Token::Bytes(vec![0xab, 0xcd]),
+            ]
+        )])))),
+    };
+
+    let event = decode_tron_event(&log).expect("decode raw Tron block-scan event");
+
+    assert_eq!(
+        event,
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: ormpindexer::schema::ChainLogMetadata {
+                id: "62254349-0xtrontx-7".to_owned(),
+                source: EventSource::Tron,
+                chain_id: TRON_CHAIN_ID.into(),
+                block_number: 62_254_349,
+                block_hash: Some(
+                    "0x9c64f37100000000000000000000000000000000000000000000000000000000".to_owned(),
+                ),
+                block_timestamp: 1_800_000_000_000,
+                transaction_hash: "trontx".to_owned(),
+                transaction_index: 4,
+                log_index: 7,
+                contract_address: "415c5c383febe62f377f8c0ea1de97f2a2ba102e98".to_owned(),
+                transaction_from: Some("41abcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned()),
+            },
+            msg_hash: bytes_hex(0x11),
+            channel: address_hex(0x21),
+            index: 8,
+            from_chain_id: 46,
+            from: address_hex(0x22),
+            to_chain_id: 137,
+            to: address_hex(0x23),
+            gas_limit: 500_000,
+            encoded: "0xabcd".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn test_decode_tron_errors_are_explicit() {
     let unsupported = DatalensLog {
         event_name: Some("Transfer".to_owned()),
@@ -87,16 +165,16 @@ fn test_decode_tron_errors_are_explicit() {
             .contains("unsupported ORMP Tron event name Transfer")
     );
 
-    let raw_payload = DatalensLog {
+    let malformed_raw_payload = DatalensLog {
         event_name: Some("MessageSent".to_owned()),
         non_indexed_fields: Some(serde_json::json!("0x1234")),
         ..tron_log()
     };
     assert!(
-        decode_tron_event(&raw_payload)
-            .expect_err("raw payload should fail")
+        decode_tron_event(&malformed_raw_payload)
+            .expect_err("malformed raw payload should fail")
             .to_string()
-            .contains("Tron event payload must be an object")
+            .contains("decode ABI event data")
     );
 
     let missing_field = DatalensLog {
@@ -144,4 +222,12 @@ fn tron_log() -> DatalensLog {
 
 fn bytes_hex(value: u8) -> String {
     format!("0x{}", hex::encode(vec![value; 32]))
+}
+
+fn address(value: u8) -> H160 {
+    H160::from_slice(&[value; 20])
+}
+
+fn address_hex(value: u8) -> String {
+    format!("0x{}", hex::encode([value; 20]))
 }
