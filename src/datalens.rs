@@ -31,6 +31,8 @@ pub struct DatalensLog {
     pub chain_id: u64,
     #[serde(alias = "block_number")]
     pub block_number: u64,
+    #[serde(default, alias = "block_hash")]
+    pub block_hash: Option<String>,
     #[serde(default, alias = "block_timestamp")]
     pub block_timestamp: Option<u64>,
     #[serde(alias = "transaction_hash")]
@@ -439,6 +441,8 @@ struct NativeLogRow {
     id: Option<String>,
     block_number: u64,
     #[serde(default)]
+    block_hash: Option<String>,
+    #[serde(default)]
     block_timestamp: Option<u64>,
     transaction_hash: String,
     transaction_index: i32,
@@ -463,6 +467,7 @@ impl NativeLogRow {
             id: Some(id),
             chain_id,
             block_number: self.block_number,
+            block_hash: self.block_hash,
             block_timestamp: self.block_timestamp,
             transaction_hash: self.transaction_hash,
             transaction_index: Some(self.transaction_index),
@@ -494,6 +499,8 @@ struct NativeTronEventRow {
     non_indexed_fields: Option<serde_json::Value>,
     transaction_id: String,
     block_number: u64,
+    #[serde(default)]
+    block_hash: Option<String>,
     block_timestamp: u64,
     transaction_index: i32,
     event_index: u64,
@@ -527,6 +534,7 @@ impl NativeTronEventRow {
             id: Some(id),
             chain_id,
             block_number: self.block_number,
+            block_hash: self.block_hash,
             block_timestamp: Some(self.block_timestamp),
             transaction_hash: self.transaction_id,
             transaction_index: Some(self.transaction_index),

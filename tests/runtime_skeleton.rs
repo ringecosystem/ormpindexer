@@ -330,6 +330,7 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
         id: Some("46-0xtx-1".to_owned()),
         chain_id: 46,
         block_number: 12,
+        block_hash: None,
         block_timestamp: Some(1_700_000_000_000),
         transaction_hash: "0xtx".to_owned(),
         transaction_index: Some(0),

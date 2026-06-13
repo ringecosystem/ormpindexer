@@ -57,12 +57,31 @@ pub struct ChainLogMetadata {
     pub source: EventSource,
     pub chain_id: u128,
     pub block_number: u128,
+    pub block_hash: Option<String>,
     pub block_timestamp: u128,
     pub transaction_hash: String,
     pub transaction_index: i32,
     pub log_index: i32,
     pub contract_address: String,
     pub transaction_from: Option<String>,
+}
+
+fn legacy_event_log_id(metadata: &ChainLogMetadata) -> String {
+    let Some(block_hash) = metadata.block_hash.as_deref() else {
+        return metadata.id.clone();
+    };
+    let block_hash = block_hash
+        .strip_prefix("0x")
+        .or_else(|| block_hash.strip_prefix("0X"))
+        .unwrap_or(block_hash);
+    let block_hash_prefix = block_hash
+        .get(..block_hash.len().min(5))
+        .unwrap_or(block_hash)
+        .to_ascii_lowercase();
+    format!(
+        "{:010}-{}-{:06}",
+        metadata.block_number, block_hash_prefix, metadata.log_index
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -415,7 +434,7 @@ impl MsgportMessageRecvRow {
                 result,
                 return_data,
             } => Self {
-                id: metadata.id,
+                id: legacy_event_log_id(&metadata),
                 block_number: metadata.block_number,
                 transaction_hash: metadata.transaction_hash,
                 block_timestamp: metadata.block_timestamp,
@@ -464,7 +483,7 @@ impl MsgportMessageSentRow {
                 message,
                 params,
             } => Self {
-                id: metadata.id,
+                id: legacy_event_log_id(&metadata),
                 block_number: metadata.block_number,
                 transaction_hash: metadata.transaction_hash,
                 block_timestamp: metadata.block_timestamp,
@@ -512,7 +531,7 @@ impl SignaturePubSignatureSubmittionRow {
                 signature,
                 data,
             } => Self {
-                id: metadata.id,
+                id: legacy_event_log_id(&metadata),
                 block_number: metadata.block_number,
                 transaction_hash: metadata.transaction_hash,
                 block_timestamp: metadata.block_timestamp,

@@ -102,6 +102,7 @@ fn test_native_query_rows_decode_with_context_metadata() {
     assert_eq!(logs[0].id.as_deref(), Some("46-123-0xtx-3"));
     assert_eq!(logs[0].chain_id, 46);
     assert_eq!(logs[0].block_number, 123);
+    assert_eq!(logs[0].block_hash.as_deref(), Some("0xblock"));
     assert_eq!(logs[0].block_timestamp, Some(456));
     assert_eq!(logs[0].transaction_hash, "0xtx");
     assert_eq!(logs[0].transaction_index, Some(2));
@@ -158,6 +159,7 @@ fn test_tron_native_query_rows_decode_with_context_metadata() {
     assert_eq!(logs[0].id.as_deref(), Some("728126428-123-trontx-3"));
     assert_eq!(logs[0].chain_id, TRON_CHAIN_ID);
     assert_eq!(logs[0].block_number, 123);
+    assert_eq!(logs[0].block_hash.as_deref(), Some("0xblock"));
     assert_eq!(logs[0].block_timestamp, Some(456));
     assert_eq!(logs[0].transaction_hash, "trontx");
     assert_eq!(logs[0].transaction_index, Some(2));
