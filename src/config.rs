@@ -73,6 +73,8 @@ impl RuntimeConfig {
         if datalens_query_max_attempts == 0 {
             bail!("ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS must be greater than zero");
         }
+        let datalens_head_buffer_blocks =
+            optional_u64(env, "ORMPINDEXER_DATALENS_HEAD_BUFFER_BLOCKS")?.unwrap_or(1);
 
         Ok(Self {
             datalens: DatalensConfig {
@@ -83,6 +85,7 @@ impl RuntimeConfig {
                 token: optional_env(env, "ORMPINDEXER_DATALENS_TOKEN").map(SecretString::new),
                 timeout: Duration::from_secs(datalens_timeout_secs),
                 query_max_attempts: datalens_query_max_attempts,
+                head_buffer_blocks: datalens_head_buffer_blocks,
             },
             warmup: DatalensWarmupConfig {
                 enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?
@@ -126,6 +129,7 @@ pub struct DatalensConfig {
     pub token: Option<SecretString>,
     pub timeout: Duration,
     pub query_max_attempts: u64,
+    pub head_buffer_blocks: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -182,18 +182,21 @@ where
                     chain.chain_id, dataset, chain.start_block
                 )
             })?;
-        let target_block = self
+        let latest_block = self
             .reader
             .latest_block(chain.chain_id, self.config.finality_mode)
             .await
             .with_context(|| format!("query Datalens chain head for chain {}", chain.chain_id))?;
+        let target_block = latest_block.saturating_sub(self.config.datalens.head_buffer_blocks);
         if checkpoint.next_block > target_block {
             log::info!(
-                "skipping ORMP Datalens chain_id={} dataset={} checkpoint_next_block={} target_block={} checkpoint_ahead_of_target=true",
+                "skipping ORMP Datalens chain_id={} dataset={} checkpoint_next_block={} target_block={} latest_block={} head_buffer_blocks={} checkpoint_ahead_of_target=true",
                 chain.chain_id,
                 dataset,
                 checkpoint.next_block,
                 target_block,
+                latest_block,
+                self.config.datalens.head_buffer_blocks,
             );
             return Ok(ChainRunReport {
                 caught_up: true,

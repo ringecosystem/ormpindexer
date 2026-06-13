@@ -38,6 +38,10 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
             "5".to_owned(),
         ),
         (
+            "ORMPINDEXER_DATALENS_HEAD_BUFFER_BLOCKS".to_owned(),
+            "2".to_owned(),
+        ),
+        (
             "ORMPINDEXER_DATABASE_URL".to_owned(),
             "postgres://user:pass@localhost/ormp".to_owned(),
         ),
@@ -94,6 +98,7 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
     assert!(config.datalens.token.is_some());
     assert_eq!(config.datalens.timeout, Duration::from_secs(120));
     assert_eq!(config.datalens.query_max_attempts, 5);
+    assert_eq!(config.datalens.head_buffer_blocks, 2);
     assert!(config.database_url.is_some());
     assert_eq!(config.enabled_chains.len(), 2);
     assert_eq!(config.batch_size, 250);
@@ -159,6 +164,7 @@ fn test_runtime_config_reads_datalens_retry_defaults() {
 
     assert_eq!(config.datalens.timeout, Duration::from_secs(300));
     assert_eq!(config.datalens.query_max_attempts, 3);
+    assert_eq!(config.datalens.head_buffer_blocks, 1);
     assert_eq!(config.batch_size, 1_000);
     assert_eq!(config.chain(46).expect("chain 46").batch_size, 1_000);
 }
@@ -337,7 +343,7 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
         indexed_fields: Vec::new(),
         non_indexed_fields: None,
     }])
-    .with_head(46, 14);
+    .with_head(46, 15);
     let runner = IndexerRunner::new(
         config,
         reader,
@@ -381,7 +387,7 @@ async fn test_runner_empty_logs_still_advance_after_successful_query_and_write()
     let checkpoints = InMemoryCheckpointStore::default();
     let runner = IndexerRunner::new(
         config,
-        RecordingDatalensReader::new(Vec::new()).with_head(46, 14),
+        RecordingDatalensReader::new(Vec::new()).with_head(46, 15),
         checkpoints.clone(),
         NoopDecoder,
         DryRunEventWriter,
@@ -442,7 +448,7 @@ async fn test_runner_caps_query_range_at_datalens_head() {
     ]);
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
-    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 12);
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 13);
     let runner = IndexerRunner::new(
         config,
         reader.clone(),
@@ -458,6 +464,46 @@ async fn test_runner_caps_query_range_at_datalens_head() {
     let queries = reader.queries.lock().expect("queries lock");
     assert_eq!(queries[0].from_block, 10);
     assert_eq!(queries[0].to_block, 12);
+}
+
+#[tokio::test]
+async fn test_runner_applies_default_datalens_head_buffer_to_follow_target() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "14".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 15);
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("buffered batch succeeds");
+
+    assert_eq!(report.checkpoints_advanced, 1);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
+    let queries = reader.queries.lock().expect("queries lock");
+    assert_eq!(
+        queries
+            .iter()
+            .map(|query| (query.from_block, query.to_block))
+            .collect::<Vec<_>>(),
+        vec![(14, 14)]
+    );
 }
 
 #[tokio::test]
@@ -477,7 +523,7 @@ async fn test_runner_processes_contiguous_ranges_until_caught_up() {
     ]);
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
-    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 22);
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 23);
     let runner = IndexerRunner::new(
         config,
         reader.clone(),
@@ -519,7 +565,7 @@ async fn test_runner_splits_retryable_datalens_range_failure_and_advances_childr
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
     let reader = RecordingDatalensReader::new(Vec::new())
-        .with_head(46, 13)
+        .with_head(46, 14)
         .with_range_query_failure(46, 10, 13, "provider_failure: upstream returned 524");
     let runner = IndexerRunner::new(
         config,
@@ -563,7 +609,7 @@ async fn test_runner_stops_checkpoint_at_retryable_single_block_failure_after_le
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
     let reader = RecordingDatalensReader::new(Vec::new())
-        .with_head(46, 13)
+        .with_head(46, 14)
         .with_range_query_failure(46, 10, 13, "provider_failure: upstream returned 524")
         .with_range_query_failure(46, 12, 13, "provider range limit exceeded")
         .with_range_query_failure(46, 12, 12, "provider_failure: upstream returned 524");
@@ -612,7 +658,7 @@ async fn test_runner_does_not_split_non_retryable_datalens_failure() {
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
     let reader = RecordingDatalensReader::new(Vec::new())
-        .with_head(46, 13)
+        .with_head(46, 14)
         .with_range_query_failure(46, 10, 13, "permission denied");
     let runner = IndexerRunner::new(
         config,
@@ -656,7 +702,7 @@ async fn test_runner_does_not_split_downstream_timeout_failure() {
     ]);
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
-    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 13);
+    let reader = RecordingDatalensReader::new(Vec::new()).with_head(46, 14);
     let runner = IndexerRunner::new(
         config,
         reader.clone(),
@@ -700,7 +746,7 @@ async fn test_runner_does_not_split_generic_transient_datalens_failure() {
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
     let checkpoints = InMemoryCheckpointStore::default();
     let reader = RecordingDatalensReader::new(Vec::new())
-        .with_head(46, 13)
+        .with_head(46, 14)
         .with_range_query_failure(46, 10, 13, "request timed out after 60 seconds");
     let runner = IndexerRunner::new(
         config,
@@ -747,8 +793,8 @@ async fn test_runner_writer_failure_does_not_advance_checkpoint() {
     let runner = IndexerRunner::new(
         config,
         RecordingDatalensReader::new(Vec::new())
-            .with_head(1, 14)
-            .with_head(46, 24),
+            .with_head(1, 15)
+            .with_head(46, 25),
         checkpoints.clone(),
         NoopDecoder,
         FailingEventWriter,
@@ -792,8 +838,8 @@ async fn test_runner_reports_and_advances_multiple_chains() {
     let runner = IndexerRunner::new(
         config,
         RecordingDatalensReader::new(Vec::new())
-            .with_head(1, 14)
-            .with_head(46, 24),
+            .with_head(1, 15)
+            .with_head(46, 25),
         checkpoints.clone(),
         NoopDecoder,
         DryRunEventWriter,
@@ -844,8 +890,8 @@ async fn test_runner_slow_chain_does_not_block_other_chain_checkpoint_progress()
     let runner = IndexerRunner::new(
         config,
         RecordingDatalensReader::new(Vec::new())
-            .with_head(1, 14)
-            .with_head(46, 14)
+            .with_head(1, 15)
+            .with_head(46, 15)
             .with_query_delay(1, Duration::from_millis(300)),
         checkpoints.clone(),
         NoopDecoder,
@@ -902,7 +948,7 @@ async fn test_runner_loop_recovers_chain_errors_without_blocking_other_chains() 
         .await
         .expect("seed healthy chain checkpoint");
     let reader = RecordingDatalensReader::new(Vec::new())
-        .with_head(46, 14)
+        .with_head(46, 15)
         .with_query_failure(1, "provider failed");
     let runner = IndexerRunner::new(
         config,
