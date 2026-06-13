@@ -91,8 +91,7 @@ impl RuntimeConfig {
                 min_request_interval: Duration::from_millis(datalens_min_request_interval_ms),
             },
             warmup: DatalensWarmupConfig {
-                enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?
-                    .unwrap_or(false),
+                enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?.unwrap_or(true),
                 ensure_on_startup: optional_bool(
                     env,
                     "ORMPINDEXER_DATALENS_WARMUP_ENSURE_ON_STARTUP",

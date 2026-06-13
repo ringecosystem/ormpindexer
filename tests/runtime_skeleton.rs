@@ -147,7 +147,7 @@ fn test_runtime_config_from_env_map_reads_warmup_defaults() {
 
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
 
-    assert!(!config.warmup.enabled);
+    assert!(config.warmup.enabled);
     assert!(config.warmup.ensure_on_startup);
     assert!(!config.warmup.required);
     assert_eq!(config.warmup.chunk_size, 250);
