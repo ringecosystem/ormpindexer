@@ -1,3 +1,8 @@
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -74,6 +79,7 @@ pub trait DatalensLogReader {
 pub struct DatalensHttpClient {
     config: DatalensConfig,
     http: reqwest::Client,
+    request_pacer: Arc<Mutex<Option<Instant>>>,
 }
 
 impl DatalensHttpClient {
@@ -82,7 +88,11 @@ impl DatalensHttpClient {
             .timeout(config.timeout)
             .build()
             .expect("build Datalens HTTP client");
-        Self { config, http }
+        Self {
+            config,
+            http,
+            request_pacer: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn native_graphql_endpoint(&self) -> String {
@@ -149,6 +159,7 @@ impl DatalensHttpClient {
         G: Fn(&str) -> bool,
     {
         for attempt in 1..=self.config.query_max_attempts {
+            self.wait_for_request_slot().await;
             let response = match build_request().send().await {
                 Ok(response) => response,
                 Err(error) => {
@@ -187,28 +198,34 @@ impl DatalensHttpClient {
             };
             if status.is_success() {
                 if should_retry_body(&body) && attempt < self.config.query_max_attempts {
+                    let retry_delay =
+                        graphql_retry_after(&body).unwrap_or_else(|| datalens_retry_delay(attempt));
                     log::warn!(
-                        "{} returned retryable response attempt={} max_attempts={}",
+                        "{} returned retryable response attempt={} max_attempts={} retry_delay_ms={}",
                         operation,
                         attempt,
                         self.config.query_max_attempts,
+                        retry_delay.as_millis()
                     );
-                    sleep(datalens_retry_delay(attempt)).await;
+                    sleep(retry_delay).await;
                     continue;
                 }
                 return Ok(body);
             }
 
             if is_retryable_http_status(status) && attempt < self.config.query_max_attempts {
+                let retry_delay =
+                    http_retry_after(&body).unwrap_or_else(|| datalens_retry_delay(attempt));
                 log::warn!(
-                    "{} failed with status {} attempt={} max_attempts={} body={}",
+                    "{} failed with status {} attempt={} max_attempts={} retry_delay_ms={} body={}",
                     operation,
                     status,
                     attempt,
                     self.config.query_max_attempts,
+                    retry_delay.as_millis(),
                     body
                 );
-                sleep(datalens_retry_delay(attempt)).await;
+                sleep(retry_delay).await;
                 continue;
             }
 
@@ -216,6 +233,40 @@ impl DatalensHttpClient {
         }
 
         unreachable!("query_max_attempts is validated as greater than zero")
+    }
+
+    async fn wait_for_request_slot(&self) {
+        let min_interval = self.config.min_request_interval;
+        if min_interval.is_zero() {
+            return;
+        }
+        loop {
+            let delay = {
+                let mut last_request_at = self
+                    .request_pacer
+                    .lock()
+                    .expect("Datalens request pacer lock");
+                match *last_request_at {
+                    Some(last_started_at) => {
+                        let elapsed = last_started_at.elapsed();
+                        if elapsed >= min_interval {
+                            *last_request_at = Some(Instant::now());
+                            None
+                        } else {
+                            Some(min_interval - elapsed)
+                        }
+                    }
+                    None => {
+                        *last_request_at = Some(Instant::now());
+                        None
+                    }
+                }
+            };
+            let Some(delay) = delay else {
+                return;
+            };
+            sleep(delay).await;
+        }
     }
 }
 
@@ -312,6 +363,7 @@ pub fn classify_datalens_failure_message(message: &str) -> DatalensFailureKind {
         || message.contains("providerfailure")
         || message.contains("rate-limit")
         || message.contains("rate limit")
+        || message.contains("rate_limited")
         || message.contains("bad gateway")
         || message.contains("service unavailable")
         || message.contains("gateway timeout")
@@ -358,10 +410,61 @@ fn graphql_error_is_retryable(error: &serde_json::Value) -> bool {
         }
     }
 
+    if let Some(kind) = extensions.get("kind").and_then(serde_json::Value::as_str) {
+        if matches!(
+            classify_datalens_failure_message(kind),
+            DatalensFailureKind::Transient
+        ) {
+            return true;
+        }
+    }
+
     ["status", "statusCode", "httpStatus"]
         .iter()
         .filter_map(|key| extensions.get(*key))
         .any(retryable_status_value)
+}
+
+fn graphql_retry_after(body: &str) -> Option<Duration> {
+    let payload = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let errors = payload.get("errors")?;
+    if let Some(errors) = errors.as_array() {
+        errors
+            .iter()
+            .filter(|error| graphql_error_is_retryable(error))
+            .find_map(retry_after_from_value)
+    } else if graphql_error_is_retryable(errors) {
+        retry_after_from_value(errors)
+    } else {
+        None
+    }
+}
+
+fn http_retry_after(body: &str) -> Option<Duration> {
+    let payload = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    retry_after_from_value(&payload)
+}
+
+fn retry_after_from_value(value: &serde_json::Value) -> Option<Duration> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(seconds) = object
+                .get("retry_after_seconds")
+                .and_then(retry_after_seconds)
+            {
+                return Some(Duration::from_secs(seconds));
+            }
+            object.values().find_map(retry_after_from_value)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(retry_after_from_value),
+        _ => None,
+    }
+}
+
+fn retry_after_seconds(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
 }
 
 fn retryable_status_value(value: &serde_json::Value) -> bool {
@@ -767,6 +870,66 @@ mod tests {
         .to_string();
 
         assert!(body_has_retryable_graphql_errors(&body));
+    }
+
+    #[test]
+    fn test_retry_after_seconds_from_graphql_rate_limited_error() {
+        let body = serde_json::json!({
+            "errors": [{
+                "message": "quota exceeded",
+                "extensions": {
+                    "kind": "rate_limited",
+                    "status": 429,
+                    "quota": {
+                        "retry_after_seconds": 20
+                    }
+                }
+            }]
+        })
+        .to_string();
+
+        assert!(body_has_retryable_graphql_errors(&body));
+        assert_eq!(
+            graphql_retry_after(&body),
+            Some(std::time::Duration::from_secs(20))
+        );
+    }
+
+    #[test]
+    fn test_retry_after_seconds_from_http_rate_limited_body() {
+        let body = serde_json::json!({
+            "error": {
+                "kind": "rate_limited",
+                "quota": {
+                    "retry_after_seconds": 7
+                }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            http_retry_after(&body),
+            Some(std::time::Duration::from_secs(7))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_pacer_waits_between_client_requests() {
+        let client = DatalensHttpClient::new(DatalensConfig {
+            endpoint: "http://localhost:8080".to_owned(),
+            application: "test".to_owned(),
+            token: None,
+            timeout: Duration::from_secs(1),
+            query_max_attempts: 1,
+            head_buffer_blocks: 1,
+            min_request_interval: Duration::from_millis(5),
+        });
+
+        client.wait_for_request_slot().await;
+        let started = Instant::now();
+        client.wait_for_request_slot().await;
+
+        assert!(started.elapsed() >= Duration::from_millis(4));
     }
 
     #[test]

@@ -42,6 +42,10 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
             "2".to_owned(),
         ),
         (
+            "ORMPINDEXER_DATALENS_MIN_REQUEST_INTERVAL_MS".to_owned(),
+            "250".to_owned(),
+        ),
+        (
             "ORMPINDEXER_DATABASE_URL".to_owned(),
             "postgres://user:pass@localhost/ormp".to_owned(),
         ),
@@ -99,6 +103,10 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
     assert_eq!(config.datalens.timeout, Duration::from_secs(120));
     assert_eq!(config.datalens.query_max_attempts, 5);
     assert_eq!(config.datalens.head_buffer_blocks, 2);
+    assert_eq!(
+        config.datalens.min_request_interval,
+        Duration::from_millis(250)
+    );
     assert!(config.database_url.is_some());
     assert_eq!(config.enabled_chains.len(), 2);
     assert_eq!(config.batch_size, 250);
@@ -165,6 +173,10 @@ fn test_runtime_config_reads_datalens_retry_defaults() {
     assert_eq!(config.datalens.timeout, Duration::from_secs(300));
     assert_eq!(config.datalens.query_max_attempts, 3);
     assert_eq!(config.datalens.head_buffer_blocks, 1);
+    assert_eq!(
+        config.datalens.min_request_interval,
+        Duration::from_millis(100)
+    );
     assert_eq!(config.batch_size, 1_000);
     assert_eq!(config.chain(46).expect("chain 46").batch_size, 1_000);
 }
