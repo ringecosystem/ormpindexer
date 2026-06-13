@@ -51,7 +51,7 @@ pub struct DatalensWarmupSubmitRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WarmupChainIdentity {
-    pub family: String,
+    pub family: serde_json::Value,
     pub configured_name: String,
     pub network_id: WarmupNetworkId,
 }
@@ -239,7 +239,7 @@ pub fn evm_warmup_request(
 
     Ok(DatalensWarmupSubmitRequest {
         chain: WarmupChainIdentity {
-            family: "Evm".to_owned(),
+            family: json!("Evm"),
             configured_name: evm_chain_name(chain.chain_id)?.to_owned(),
             network_id: WarmupNetworkId {
                 kind: "numeric".to_owned(),
@@ -283,7 +283,7 @@ pub fn tron_warmup_request(
     let selector = tron_event_selector(&chain.contracts, &chain.topics)?;
     Ok(DatalensWarmupSubmitRequest {
         chain: WarmupChainIdentity {
-            family: "Other".to_owned(),
+            family: json!({ "Other": "tron" }),
             configured_name: tron_chain_name(chain.chain_id)?.to_owned(),
             network_id: WarmupNetworkId {
                 kind: "numeric".to_owned(),

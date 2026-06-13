@@ -93,7 +93,7 @@ fn test_tron_warmup_request_uses_ormp_selector_and_checkpoint_start() {
         value,
         serde_json::json!({
             "chain": {
-                "family": "Other",
+                "family": {"Other": "tron"},
                 "configured_name": "tron-mainnet",
                 "network_id": {"kind": "numeric", "value": 728126428}
             },
