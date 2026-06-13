@@ -5,8 +5,8 @@ use ormpindexer::{
     planner::{
         PRODUCTION_EVM_CHAIN_IDS, SIGNATURE_PUB_ADDRESS, SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
         TRON_CHAIN_ID, TRON_MESSAGE_ACCEPTED_EVENT, TRON_MESSAGE_DISPATCHED_EVENT,
-        default_chain_config, default_evm_chain_config, default_tron_chain_config,
-        plan_evm_log_queries, plan_tron_event_queries,
+        TRON_MSGPORT_ADDRESS, TRON_ORMP_ADDRESS, default_chain_config, default_evm_chain_config,
+        default_tron_chain_config, plan_evm_log_queries, plan_tron_event_queries,
     },
 };
 
@@ -96,7 +96,16 @@ fn test_tron_chain_default_config_and_query_plans_are_available() {
     .expect("tron query plans");
 
     assert_eq!(chain.chain_id, TRON_CHAIN_ID);
-    assert!(!chain.contracts.is_empty());
+    assert_eq!(
+        TRON_ORMP_ADDRESS,
+        "415c5c383febe62f377f8c0ea1de97f2a2ba102e98"
+    );
+    assert_eq!(
+        TRON_MSGPORT_ADDRESS,
+        "413bc5362ec3a3dbc07292aed4ef18be18de02da3a"
+    );
+    assert!(chain.contracts.contains(&TRON_ORMP_ADDRESS.to_owned()));
+    assert!(chain.contracts.contains(&TRON_MSGPORT_ADDRESS.to_owned()));
     assert!(
         chain
             .topics

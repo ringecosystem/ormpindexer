@@ -29,8 +29,8 @@ pub const EVM_LOGS_DATASET: &str = "evm.logs";
 pub const TRON_CHAIN_ID: u64 = 728_126_428;
 pub const TRON_EVENTS_DATASET: &str = "tron.events";
 
-pub const TRON_MSGPORT_ADDRESS: &str = "0x2cd1867Fb8016f93710B6386f7f9F1D540A60812";
-pub const TRON_ORMP_ADDRESS: &str = "0x13b2211a7cA45Db2808F6dB05557ce5347e3634e";
+pub const TRON_MSGPORT_ADDRESS: &str = "413bc5362ec3a3dbc07292aed4ef18be18de02da3a";
+pub const TRON_ORMP_ADDRESS: &str = "415c5c383febe62f377f8c0ea1de97f2a2ba102e98";
 pub const TRON_SIGNATURE_PUB_ADDRESS: &str = "0x57Aa601A0377f5AB313C5A955ee874f5D495fC92";
 
 pub const TRON_HASH_IMPORTED_EVENT: &str = "HashImported";

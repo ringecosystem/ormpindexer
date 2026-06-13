@@ -102,8 +102,8 @@ fn test_tron_warmup_request_uses_ormp_selector_and_checkpoint_start() {
                 "kind": "other",
                 "value": {
                     "kind": "tron_events",
-                    "fingerprint": "tron-events/47bf6bd754c8e9955438fdc7",
-                    "canonical_key": "contracts/4113b2211a7ca45db2808f6db05557ce5347e3634e+412cd1867fb8016f93710b6386f7f9f1d540a60812+4157aa601a0377f5ab313c5a955ee874f5d495fc92/events/HashImported+MessageAccepted+MessageAssigned+MessageDispatched+MessageRecv+MessageSent+SignatureSubmittion"
+                    "fingerprint": "tron-events/7b3dbd4a0128ad9c818ddb13",
+                    "canonical_key": "contracts/413bc5362ec3a3dbc07292aed4ef18be18de02da3a+4157aa601a0377f5ab313c5a955ee874f5d495fc92+415c5c383febe62f377f8c0ea1de97f2a2ba102e98/events/HashImported+MessageAccepted+MessageAssigned+MessageDispatched+MessageRecv+MessageSent+SignatureSubmittion"
                 }
             },
             "range_kind": {"kind": "block"},
