@@ -161,6 +161,7 @@ pub const ADDRESS_ORACLE: &[&str] = &[
 pub const LEGACY_B49E_ORACLE: &str = "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e";
 pub const LEGACY_B49E_ORACLE_FROM_BLOCK: u128 = 22_474_070;
 pub const LEGACY_B49E_DARWINIA_FROM_BLOCK: u128 = 6_634_860;
+pub const LEGACY_B49E_ARBITRUM_FROM_BLOCK: u128 = 334_644_126;
 pub const LEGACY_MIXED_CASE_ACCEPTED_ID: &str =
     "0x5e6f833385d1a3041e8033e64c32c7c931104bc56881ef155fcb6032e87617df";
 pub const LEGACY_MIXED_CASE_ACCEPTED_ORACLE: &str = "0x8d8a2Bd991c1d900C59a82a2EEb0DF44e0671aaB";
@@ -234,7 +235,10 @@ pub fn is_oracle_assignment_for_accepted(
                 && accepted.block_number >= LEGACY_B49E_ORACLE_FROM_BLOCK)
                 || (accepted.chain_id == 46
                     && accepted.from_chain_id == 46
-                    && accepted.block_number >= LEGACY_B49E_DARWINIA_FROM_BLOCK)))
+                    && accepted.block_number >= LEGACY_B49E_DARWINIA_FROM_BLOCK)
+                || (accepted.chain_id == 42_161
+                    && accepted.from_chain_id == 42_161
+                    && accepted.block_number >= LEGACY_B49E_ARBITRUM_FROM_BLOCK)))
 }
 
 pub fn accepted_oracle_value<'a>(accepted_id: &str, oracle: &'a str) -> &'a str {

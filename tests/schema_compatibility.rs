@@ -159,11 +159,56 @@ fn test_legacy_b49e_oracle_backfills_darwinia_after_cutover() {
 }
 
 #[test]
+fn test_legacy_b49e_oracle_backfills_arbitrum_after_cutover_for_any_target_chain() {
+    for (to_chain_id, block_number) in [(46, 334_644_126), (2_818, 368_234_912)] {
+        let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata("accepted-log"),
+            msg_hash: "0xarbitrum-b49e".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 8,
+            from_chain_id: 42_161,
+            from: "0xfrom".to_owned(),
+            to_chain_id,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        });
+        accepted.chain_id = 42_161;
+        accepted.block_number = block_number;
+        let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("assigned-log"),
+            msg_hash: accepted.id.clone(),
+            oracle: LEGACY_B49E_ORACLE.to_owned(),
+            relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+            oracle_fee: 3_000_000_000_000,
+            relayer_fee: 22,
+            params: "0xparams".to_owned(),
+        });
+
+        let updated = apply_assignment_to_accepted(
+            &mut accepted,
+            &assigned,
+            &AssignmentConfig::legacy_defaults(),
+        );
+
+        assert!(
+            updated.oracle,
+            "expected b49e oracle backfill for Arbitrum to {to_chain_id} at block {block_number}"
+        );
+        assert!(!updated.relayer);
+        assert_eq!(accepted.oracle.as_deref(), Some(LEGACY_B49E_ORACLE));
+        assert_eq!(accepted.oracle_assigned, Some(true));
+        assert_eq!(accepted.oracle_assigned_fee, Some(3_000_000_000_000));
+    }
+}
+
+#[test]
 fn test_legacy_b49e_oracle_does_not_backfill_outside_ethereum_to_darwinia_cutover() {
     for (chain_id, from_chain_id, to_chain_id, block_number) in [
         (1, 1, 42_161, 22_336_887),
         (1, 1, 46, 22_363_073),
         (46, 46, 1, 6_614_836),
+        (42_161, 42_161, 46, 333_775_437),
     ] {
         let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
             metadata: evm_metadata("accepted-log"),
