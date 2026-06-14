@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 
+use ormpindexer::schema::{LEGACY_MIXED_CASE_ACCEPTED_ID, LEGACY_MIXED_CASE_ACCEPTED_ORACLE};
 use ormpindexer::{
     database::{EventWriter, PostgresEventWriter, apply_migrations},
     schema::{ADDRESS_ORACLE, ADDRESS_RELAYER, ChainLogMetadata, EventSource, LegacyOrmPEvent},
@@ -32,8 +33,8 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(written, events.len());
     assert_eq!(repeated, events.len());
     assert_table_count(&pool, "ormp_hash_imported", 1).await;
-    assert_table_count(&pool, "ormp_message_accepted", 5).await;
-    assert_table_count(&pool, "ormp_message_assigned", 7).await;
+    assert_table_count(&pool, "ormp_message_accepted", 6).await;
+    assert_table_count(&pool, "ormp_message_assigned", 8).await;
     assert_table_count(&pool, "ormp_message_dispatched", 1).await;
     assert_table_count(&pool, "msgport_message_recv", 1).await;
     assert_table_count(&pool, "msgport_message_sent", 1).await;
@@ -95,6 +96,14 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(b49e_darwinia_negative.0, None);
     assert_eq!(b49e_darwinia_negative.1, None);
     assert_eq!(b49e_darwinia_negative.2, None);
+
+    let mixed_case = assignment_fields(&pool, LEGACY_MIXED_CASE_ACCEPTED_ID).await;
+    assert_eq!(
+        mixed_case.0.as_deref(),
+        Some(LEGACY_MIXED_CASE_ACCEPTED_ORACLE)
+    );
+    assert_eq!(mixed_case.1, Some(true));
+    assert_eq!(mixed_case.2.as_deref(), Some("77"));
 
     let writer = PostgresEventWriter::new(pool.clone());
     writer
@@ -211,6 +220,18 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             gas_limit: 500_000,
             encoded: "0xencoded".to_owned(),
         },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata("mixed-case-accepted-log"),
+            msg_hash: LEGACY_MIXED_CASE_ACCEPTED_ID.to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 13,
+            from_chain_id: 1,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 46,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
         LegacyOrmPEvent::MessageAssigned {
             metadata: evm_metadata("assigned-log"),
             msg_hash: "0xaccepted".to_owned(),
@@ -271,6 +292,15 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
             relayer: "0x0000000000000000000000000000000000000002".to_owned(),
             oracle_fee: 1_000_000_000_000_000_000,
+            relayer_fee: 44,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("mixed-case-assigned-log"),
+            msg_hash: LEGACY_MIXED_CASE_ACCEPTED_ID.to_owned(),
+            oracle: ADDRESS_ORACLE[0].to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 77,
             relayer_fee: 44,
             params: "0xparams".to_owned(),
         },
