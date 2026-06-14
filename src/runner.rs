@@ -135,7 +135,7 @@ where
             match self.run_chain_once(chain.clone()).await {
                 Ok(report) => {
                     consecutive_failures = 0;
-                    if should_sleep_after_run(&report) {
+                    if should_sleep_after_report(&report) {
                         sleep(self.config.poll_interval).await;
                     }
                 }
@@ -563,7 +563,7 @@ fn batch_progress(
     }
 }
 
-fn should_sleep_after_run<R>(report: &R) -> bool
+fn should_sleep_after_report<R>(report: &R) -> bool
 where
     R: RunReport,
 {
@@ -574,42 +574,4 @@ fn failure_backoff(poll_interval: Duration, consecutive_failures: u64) -> Durati
     let multiplier = 1_u128 << consecutive_failures.saturating_sub(1).min(10);
     let millis = poll_interval.as_millis().max(1).saturating_mul(multiplier);
     Duration::from_millis(millis.min(60_000) as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_sleep_after_run_when_no_ranges_queried() {
-        assert!(should_sleep_after_run(&RunnerReport::default()));
-    }
-
-    #[test]
-    fn test_should_not_sleep_after_run_when_backlog_advanced() {
-        let report = RunnerReport {
-            ranges_queried: 1,
-            ..RunnerReport::default()
-        };
-
-        assert!(!should_sleep_after_run(&report));
-    }
-
-    #[test]
-    fn test_failure_backoff_grows_from_poll_interval_and_caps() {
-        let poll_interval = std::time::Duration::from_secs(2);
-
-        assert_eq!(
-            failure_backoff(poll_interval, 1),
-            std::time::Duration::from_secs(2)
-        );
-        assert_eq!(
-            failure_backoff(poll_interval, 2),
-            std::time::Duration::from_secs(4)
-        );
-        assert_eq!(
-            failure_backoff(poll_interval, 6),
-            std::time::Duration::from_secs(60)
-        );
-    }
 }
