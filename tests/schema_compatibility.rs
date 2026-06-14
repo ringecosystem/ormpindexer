@@ -113,46 +113,12 @@ fn test_legacy_oracle_allowlist_matches_verified_endpoint_behavior() {
     );
     assert_eq!(accepted.oracle_assigned, Some(true));
     assert_eq!(accepted.oracle_assigned_fee, Some(11));
-
-    let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
-        metadata: evm_metadata("accepted-log-2"),
-        msg_hash: "0xother".to_owned(),
-        channel: "0xchannel".to_owned(),
-        index: 9,
-        from_chain_id: 1,
-        from: "0xfrom".to_owned(),
-        to_chain_id: 46,
-        to: "0xto".to_owned(),
-        gas_limit: 500_000,
-        encoded: "0xencoded".to_owned(),
-    });
-    let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
-        metadata: evm_metadata("assigned-log-2"),
-        msg_hash: accepted.id.clone(),
-        oracle: "0xbe01b76ab454ae2497ae43168b1f70c92ac1c726".to_owned(),
-        relayer: "0x0000000000000000000000000000000000000001".to_owned(),
-        oracle_fee: 33,
-        relayer_fee: 44,
-        params: "0xparams".to_owned(),
-    });
-
-    let updated = apply_assignment_to_accepted(
-        &mut accepted,
-        &assigned,
-        &AssignmentConfig::legacy_defaults(),
-    );
-
-    assert!(updated.oracle);
-    assert_eq!(
-        accepted.oracle.as_deref(),
-        Some("0xbe01b76ab454ae2497ae43168b1f70c92ac1c726")
-    );
-    assert_eq!(accepted.oracle_assigned_fee, Some(33));
 }
 
 #[test]
 fn test_unverified_oracles_do_not_backfill_unconditionally() {
     for oracle in [
+        "0xbe01b76ab454ae2497ae43168b1f70c92ac1c726",
         "0xd250c974cbe8eea25ab75c0fc9a18d612ae4b043",
         "0x985bddbc7e66964f131e3161ba8864f481cbcb2d",
     ] {
