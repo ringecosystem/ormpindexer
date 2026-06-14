@@ -157,7 +157,6 @@ pub const ADDRESS_ORACLE: &[&str] = &[
     "0x8d8a2bd991c1d900c59a82a2eeb0df44e0671aab",
     "0x2cdc7178013de451ed99607ac15def6bab8c37e6",
     "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e",
-    "0xbe01b76ab454ae2497ae43168b1f70c92ac1c726",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
