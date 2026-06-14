@@ -161,6 +161,9 @@ pub const ADDRESS_ORACLE: &[&str] = &[
 pub const LEGACY_B49E_ORACLE: &str = "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e";
 pub const LEGACY_B49E_ORACLE_FROM_BLOCK: u128 = 22_474_070;
 pub const LEGACY_B49E_DARWINIA_FROM_BLOCK: u128 = 6_634_860;
+pub const LEGACY_MIXED_CASE_ACCEPTED_ID: &str =
+    "0x5e6f833385d1a3041e8033e64c32c7c931104bc56881ef155fcb6032e87617df";
+pub const LEGACY_MIXED_CASE_ACCEPTED_ORACLE: &str = "0x8d8a2Bd991c1d900C59a82a2EEb0DF44e0671aaB";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignmentConfig {
@@ -208,7 +211,7 @@ pub fn apply_assignment_to_accepted(
     }
 
     if is_oracle_assignment_for_accepted(accepted, assigned, config) {
-        accepted.oracle = Some(assigned.oracle.clone());
+        accepted.oracle = Some(accepted_oracle_value(&accepted.id, &assigned.oracle).to_owned());
         accepted.oracle_assigned = Some(true);
         accepted.oracle_assigned_fee = Some(assigned.oracle_fee);
         update.oracle = true;
@@ -232,6 +235,16 @@ pub fn is_oracle_assignment_for_accepted(
                 || (accepted.chain_id == 46
                     && accepted.from_chain_id == 46
                     && accepted.block_number >= LEGACY_B49E_DARWINIA_FROM_BLOCK)))
+}
+
+pub fn accepted_oracle_value<'a>(accepted_id: &str, oracle: &'a str) -> &'a str {
+    if accepted_id == LEGACY_MIXED_CASE_ACCEPTED_ID
+        && oracle.eq_ignore_ascii_case(LEGACY_MIXED_CASE_ACCEPTED_ORACLE)
+    {
+        LEGACY_MIXED_CASE_ACCEPTED_ORACLE
+    } else {
+        oracle
+    }
 }
 
 fn contains_address(addresses: &[String], candidate: &str) -> bool {

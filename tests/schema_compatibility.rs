@@ -1,8 +1,8 @@
 use ormpindexer::schema::{
     ADDRESS_ORACLE, ADDRESS_RELAYER, AssignmentConfig, ChainLogMetadata, EventSource,
-    LegacyOrmPEvent, LegacySchema, MsgportMessageRecvRow, MsgportMessageSentRow,
-    OrmpMessageAcceptedRow, OrmpMessageAssignedRow, SignaturePubSignatureSubmittionRow,
-    apply_assignment_to_accepted,
+    LEGACY_MIXED_CASE_ACCEPTED_ID, LEGACY_MIXED_CASE_ACCEPTED_ORACLE, LegacyOrmPEvent,
+    LegacySchema, MsgportMessageRecvRow, MsgportMessageSentRow, OrmpMessageAcceptedRow,
+    OrmpMessageAssignedRow, SignaturePubSignatureSubmittionRow, apply_assignment_to_accepted,
 };
 
 #[test]
@@ -203,6 +203,80 @@ fn test_legacy_b49e_oracle_does_not_backfill_outside_ethereum_to_darwinia_cutove
         assert_eq!(accepted.oracle_assigned, None);
         assert_eq!(accepted.oracle_assigned_fee, None);
     }
+}
+
+#[test]
+fn test_legacy_mixed_case_oracle_backfills_exact_accepted_id() {
+    let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+        metadata: evm_metadata("accepted-log"),
+        msg_hash: LEGACY_MIXED_CASE_ACCEPTED_ID.to_owned(),
+        channel: "0xchannel".to_owned(),
+        index: 8,
+        from_chain_id: 1,
+        from: "0xfrom".to_owned(),
+        to_chain_id: 46,
+        to: "0xto".to_owned(),
+        gas_limit: 500_000,
+        encoded: "0xencoded".to_owned(),
+    });
+    let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+        metadata: evm_metadata("assigned-log"),
+        msg_hash: LEGACY_MIXED_CASE_ACCEPTED_ID.to_owned(),
+        oracle: ADDRESS_ORACLE[0].to_owned(),
+        relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+        oracle_fee: 11,
+        relayer_fee: 22,
+        params: "0xparams".to_owned(),
+    });
+
+    let updated = apply_assignment_to_accepted(
+        &mut accepted,
+        &assigned,
+        &AssignmentConfig::legacy_defaults(),
+    );
+
+    assert!(updated.oracle);
+    assert!(!updated.relayer);
+    assert_eq!(
+        accepted.oracle.as_deref(),
+        Some(LEGACY_MIXED_CASE_ACCEPTED_ORACLE)
+    );
+    assert_eq!(accepted.oracle_assigned, Some(true));
+    assert_eq!(accepted.oracle_assigned_fee, Some(11));
+}
+
+#[test]
+fn test_legacy_mixed_case_oracle_does_not_change_other_accepted_ids() {
+    let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+        metadata: evm_metadata("accepted-log"),
+        msg_hash: "0xother".to_owned(),
+        channel: "0xchannel".to_owned(),
+        index: 8,
+        from_chain_id: 1,
+        from: "0xfrom".to_owned(),
+        to_chain_id: 46,
+        to: "0xto".to_owned(),
+        gas_limit: 500_000,
+        encoded: "0xencoded".to_owned(),
+    });
+    let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+        metadata: evm_metadata("assigned-log"),
+        msg_hash: "0xother".to_owned(),
+        oracle: ADDRESS_ORACLE[0].to_owned(),
+        relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+        oracle_fee: 11,
+        relayer_fee: 22,
+        params: "0xparams".to_owned(),
+    });
+
+    let updated = apply_assignment_to_accepted(
+        &mut accepted,
+        &assigned,
+        &AssignmentConfig::legacy_defaults(),
+    );
+
+    assert!(updated.oracle);
+    assert_eq!(accepted.oracle.as_deref(), Some(ADDRESS_ORACLE[0]));
 }
 
 #[test]

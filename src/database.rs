@@ -8,7 +8,7 @@ use crate::{
         AssignmentConfig, EventSource, LEGACY_B49E_DARWINIA_FROM_BLOCK, LEGACY_B49E_ORACLE,
         LEGACY_B49E_ORACLE_FROM_BLOCK, LegacyOrmPEvent, MsgportMessageRecvRow,
         MsgportMessageSentRow, OrmpHashImportedRow, OrmpMessageAcceptedRow, OrmpMessageAssignedRow,
-        OrmpMessageDispatchedRow, SignaturePubSignatureSubmittionRow,
+        OrmpMessageDispatchedRow, SignaturePubSignatureSubmittionRow, accepted_oracle_value,
     },
 };
 
@@ -348,6 +348,7 @@ async fn backfill_message_assignment(
     let oracle_match = contains_address(&assignment_config.oracle_addresses, &row.oracle)
         && !legacy_b49e_oracle_match;
     let relayer_match = contains_address(&assignment_config.relayer_addresses, &row.relayer);
+    let oracle_value = accepted_oracle_value(&row.msg_hash, &row.oracle);
 
     if !oracle_match && !legacy_b49e_oracle_match && !relayer_match {
         return Ok(());
@@ -366,7 +367,7 @@ async fn backfill_message_assignment(
     )
     .bind(&row.msg_hash)
     .bind(oracle_match)
-    .bind(&row.oracle)
+    .bind(oracle_value)
     .bind(row.oracle_fee.to_string())
     .bind(relayer_match)
     .bind(&row.relayer)
