@@ -33,8 +33,8 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(written, events.len());
     assert_eq!(repeated, events.len());
     assert_table_count(&pool, "ormp_hash_imported", 1).await;
-    assert_table_count(&pool, "ormp_message_accepted", 6).await;
-    assert_table_count(&pool, "ormp_message_assigned", 8).await;
+    assert_table_count(&pool, "ormp_message_accepted", 8).await;
+    assert_table_count(&pool, "ormp_message_assigned", 10).await;
     assert_table_count(&pool, "ormp_message_dispatched", 1).await;
     assert_table_count(&pool, "msgport_message_recv", 1).await;
     assert_table_count(&pool, "msgport_message_sent", 1).await;
@@ -96,6 +96,19 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(b49e_darwinia_negative.0, None);
     assert_eq!(b49e_darwinia_negative.1, None);
     assert_eq!(b49e_darwinia_negative.2, None);
+
+    let b49e_arbitrum_positive = assignment_fields(&pool, "0xb49e-arbitrum-positive").await;
+    assert_eq!(
+        b49e_arbitrum_positive.0.as_deref(),
+        Some("0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e")
+    );
+    assert_eq!(b49e_arbitrum_positive.1, Some(true));
+    assert_eq!(b49e_arbitrum_positive.2.as_deref(), Some("3000000000000"));
+
+    let b49e_arbitrum_negative = assignment_fields(&pool, "0xb49e-arbitrum-negative").await;
+    assert_eq!(b49e_arbitrum_negative.0, None);
+    assert_eq!(b49e_arbitrum_negative.1, None);
+    assert_eq!(b49e_arbitrum_negative.2, None);
 
     let mixed_case = assignment_fields(&pool, LEGACY_MIXED_CASE_ACCEPTED_ID).await;
     assert_eq!(
@@ -221,10 +234,34 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             encoded: "0xencoded".to_owned(),
         },
         LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata_at("b49e-arbitrum-positive-log", 42_161, 334_644_126),
+            msg_hash: "0xb49e-arbitrum-positive".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 13,
+            from_chain_id: 42_161,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 2_818,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata_at("b49e-arbitrum-negative-log", 42_161, 333_775_437),
+            msg_hash: "0xb49e-arbitrum-negative".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 14,
+            from_chain_id: 42_161,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 46,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAccepted {
             metadata: evm_metadata("mixed-case-accepted-log"),
             msg_hash: LEGACY_MIXED_CASE_ACCEPTED_ID.to_owned(),
             channel: "0xchannel".to_owned(),
-            index: 13,
+            index: 15,
             from_chain_id: 1,
             from: "0xfrom".to_owned(),
             to_chain_id: 46,
@@ -292,6 +329,24 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
             relayer: "0x0000000000000000000000000000000000000002".to_owned(),
             oracle_fee: 1_000_000_000_000_000_000,
+            relayer_fee: 44,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("b49e-arbitrum-positive-assigned-log"),
+            msg_hash: "0xb49e-arbitrum-positive".to_owned(),
+            oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 3_000_000_000_000,
+            relayer_fee: 44,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("b49e-arbitrum-negative-assigned-log"),
+            msg_hash: "0xb49e-arbitrum-negative".to_owned(),
+            oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 3_000_000_000_000,
             relayer_fee: 44,
             params: "0xparams".to_owned(),
         },
