@@ -276,6 +276,15 @@ fn push_where_group<'a>(
             }
         };
     }
+    #[cfg(feature = "legacy-query-compat")]
+    macro_rules! bool_cmp {
+        ($field:expr, $column:literal, $op:literal) => {
+            if let Some(value) = $field {
+                push_and(query, has_condition);
+                query.push($column).push($op).push_bind(value);
+            }
+        };
+    }
 
     text_cmp!(where_.id_eq, "id", " = ");
     text_cmp!(where_.id_not_eq, "id", " <> ");
@@ -311,6 +320,8 @@ fn push_where_group<'a>(
     text_cmp!(where_.oracle_eq, "oracle", " = ");
     text_cmp!(where_.relayer_eq, "relayer", " = ");
     text_cmp!(where_.signer_eq, "signer", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    text_in!(where_.signer_in, "signer", false);
     text_cmp!(where_.port_address_eq, "port_address", " = ");
     text_cmp!(where_.from_eq, r#""from""#, " = ");
     text_cmp!(where_.to_eq, r#""to""#, " = ");
@@ -321,6 +332,20 @@ fn push_where_group<'a>(
     bigint_cmp!(where_.src_chain_id_eq, "src_chain_id", " = ");
     bigint_cmp!(where_.target_chain_id_eq, "target_chain_id", " = ");
     bigint_cmp!(where_.msg_index_eq, "msg_index", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    {
+        bigint_cmp!(where_.msg_index_gt, "msg_index", " > ");
+        bigint_cmp!(where_.msg_index_gte, "msg_index", " >= ");
+        bigint_cmp!(where_.msg_index_lt, "msg_index", " < ");
+        bigint_cmp!(where_.msg_index_lte, "msg_index", " <= ");
+        bigint_cmp!(where_.index_eq, r#""index""#, " = ");
+        bigint_cmp!(where_.index_gt, r#""index""#, " > ");
+        bigint_cmp!(where_.index_gte, r#""index""#, " >= ");
+        bigint_cmp!(where_.index_lt, r#""index""#, " < ");
+        bigint_cmp!(where_.index_lte, r#""index""#, " <= ");
+        bool_cmp!(where_.oracle_assigned_eq, "oracle_assigned", " = ");
+        bool_cmp!(where_.relayer_assigned_eq, "relayer_assigned", " = ");
+    }
 
     if let Some(groups) = where_.and.as_ref() {
         push_logical_groups(query, has_condition, groups, " AND ");
@@ -392,6 +417,14 @@ fn push_order_by(query: &mut QueryBuilder<'_, Postgres>, order_by: Option<&[Lega
             LegacyOrderByInput::MsgHashDesc => ("msg_hash", "DESC"),
             LegacyOrderByInput::MsgIdAsc => ("msg_id", "ASC"),
             LegacyOrderByInput::MsgIdDesc => ("msg_id", "DESC"),
+            #[cfg(feature = "legacy-query-compat")]
+            LegacyOrderByInput::IndexAsc => (r#""index""#, "ASC"),
+            #[cfg(feature = "legacy-query-compat")]
+            LegacyOrderByInput::IndexDesc => (r#""index""#, "DESC"),
+            #[cfg(feature = "legacy-query-compat")]
+            LegacyOrderByInput::MsgIndexAsc => ("msg_index", "ASC"),
+            #[cfg(feature = "legacy-query-compat")]
+            LegacyOrderByInput::MsgIndexDesc => ("msg_index", "DESC"),
         };
         separated.push(format!("{column} {direction}"));
     }

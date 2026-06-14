@@ -149,6 +149,9 @@ pub struct LegacyWhereInput {
     pub relayer_eq: Option<String>,
     #[graphql(name = "signer_eq")]
     pub signer_eq: Option<String>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "signer_in")]
+    pub signer_in: Option<Vec<String>>,
     #[graphql(name = "portAddress_eq")]
     pub port_address_eq: Option<String>,
     #[graphql(name = "from_eq")]
@@ -169,6 +172,39 @@ pub struct LegacyWhereInput {
     pub target_chain_id_eq: Option<BigInt>,
     #[graphql(name = "msgIndex_eq")]
     pub msg_index_eq: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "msgIndex_gt")]
+    pub msg_index_gt: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "msgIndex_gte")]
+    pub msg_index_gte: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "msgIndex_lt")]
+    pub msg_index_lt: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "msgIndex_lte")]
+    pub msg_index_lte: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_eq")]
+    pub index_eq: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_gt")]
+    pub index_gt: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_gte")]
+    pub index_gte: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_lt")]
+    pub index_lt: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_lte")]
+    pub index_lte: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "oracleAssigned_eq")]
+    pub oracle_assigned_eq: Option<bool>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "relayerAssigned_eq")]
+    pub relayer_assigned_eq: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Enum, PartialEq)]
@@ -205,6 +241,18 @@ pub enum LegacyOrderByInput {
     MsgIdAsc,
     #[graphql(name = "msgId_DESC")]
     MsgIdDesc,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_ASC")]
+    IndexAsc,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "index_DESC")]
+    IndexDesc,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "msgIndex_ASC")]
+    MsgIndexAsc,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "msgIndex_DESC")]
+    MsgIndexDesc,
 }
 
 #[derive(Clone, Debug, FromRow, SimpleObject)]
