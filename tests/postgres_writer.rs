@@ -32,8 +32,8 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(written, events.len());
     assert_eq!(repeated, events.len());
     assert_table_count(&pool, "ormp_hash_imported", 1).await;
-    assert_table_count(&pool, "ormp_message_accepted", 3).await;
-    assert_table_count(&pool, "ormp_message_assigned", 5).await;
+    assert_table_count(&pool, "ormp_message_accepted", 5).await;
+    assert_table_count(&pool, "ormp_message_assigned", 7).await;
     assert_table_count(&pool, "ormp_message_dispatched", 1).await;
     assert_table_count(&pool, "msgport_message_recv", 1).await;
     assert_table_count(&pool, "msgport_message_sent", 1).await;
@@ -79,6 +79,22 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(b49e_negative.0, None);
     assert_eq!(b49e_negative.1, None);
     assert_eq!(b49e_negative.2, None);
+
+    let b49e_darwinia_positive = assignment_fields(&pool, "0xb49e-darwinia-positive").await;
+    assert_eq!(
+        b49e_darwinia_positive.0.as_deref(),
+        Some("0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e")
+    );
+    assert_eq!(b49e_darwinia_positive.1, Some(true));
+    assert_eq!(
+        b49e_darwinia_positive.2.as_deref(),
+        Some("1000000000000000000")
+    );
+
+    let b49e_darwinia_negative = assignment_fields(&pool, "0xb49e-darwinia-negative").await;
+    assert_eq!(b49e_darwinia_negative.0, None);
+    assert_eq!(b49e_darwinia_negative.1, None);
+    assert_eq!(b49e_darwinia_negative.2, None);
 
     let writer = PostgresEventWriter::new(pool.clone());
     writer
@@ -171,6 +187,30 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             gas_limit: 500_000,
             encoded: "0xencoded".to_owned(),
         },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata_at("b49e-darwinia-positive-log", 46, 6_634_860),
+            msg_hash: "0xb49e-darwinia-positive".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 11,
+            from_chain_id: 46,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 44,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata_at("b49e-darwinia-negative-log", 46, 6_614_836),
+            msg_hash: "0xb49e-darwinia-negative".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 12,
+            from_chain_id: 46,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 1,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
         LegacyOrmPEvent::MessageAssigned {
             metadata: evm_metadata("assigned-log"),
             msg_hash: "0xaccepted".to_owned(),
@@ -213,6 +253,24 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
             relayer: "0x0000000000000000000000000000000000000002".to_owned(),
             oracle_fee: 40_000_000_000_000,
+            relayer_fee: 44,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("b49e-darwinia-positive-assigned-log"),
+            msg_hash: "0xb49e-darwinia-positive".to_owned(),
+            oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 1_000_000_000_000_000_000,
+            relayer_fee: 44,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("b49e-darwinia-negative-assigned-log"),
+            msg_hash: "0xb49e-darwinia-negative".to_owned(),
+            oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 1_000_000_000_000_000_000,
             relayer_fee: 44,
             params: "0xparams".to_owned(),
         },
