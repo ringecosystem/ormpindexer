@@ -75,8 +75,10 @@ fn test_assigned_backfills_accepted_when_configured_addresses_match() {
     assert_eq!(accepted.relayer_assigned_fee, Some(22));
 }
 
+const LEGACY_B49E_ORACLE: &str = "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e";
+
 #[test]
-fn test_legacy_oracle_allowlist_matches_verified_endpoint_behavior() {
+fn test_legacy_b49e_oracle_backfills_ethereum_to_darwinia_after_cutover() {
     let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
         metadata: evm_metadata("accepted-log"),
         msg_hash: "0x01e4449fa917170d8f95cbefd3c854a04e503b5ba13485c3e2278087f88e3373".to_owned(),
@@ -89,12 +91,14 @@ fn test_legacy_oracle_allowlist_matches_verified_endpoint_behavior() {
         gas_limit: 500_000,
         encoded: "0xencoded".to_owned(),
     });
+    accepted.chain_id = 1;
+    accepted.block_number = 23_738_310;
     let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
         metadata: evm_metadata("assigned-log"),
         msg_hash: accepted.id.clone(),
-        oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+        oracle: LEGACY_B49E_ORACLE.to_owned(),
         relayer: "0x0000000000000000000000000000000000000001".to_owned(),
-        oracle_fee: 11,
+        oracle_fee: 2_000_000_000_000,
         relayer_fee: 22,
         params: "0xparams".to_owned(),
     });
@@ -107,12 +111,56 @@ fn test_legacy_oracle_allowlist_matches_verified_endpoint_behavior() {
 
     assert!(updated.oracle);
     assert!(!updated.relayer);
-    assert_eq!(
-        accepted.oracle.as_deref(),
-        Some("0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e")
-    );
+    assert_eq!(accepted.oracle.as_deref(), Some(LEGACY_B49E_ORACLE));
     assert_eq!(accepted.oracle_assigned, Some(true));
-    assert_eq!(accepted.oracle_assigned_fee, Some(11));
+    assert_eq!(accepted.oracle_assigned_fee, Some(2_000_000_000_000));
+}
+
+#[test]
+fn test_legacy_b49e_oracle_does_not_backfill_outside_ethereum_to_darwinia_cutover() {
+    for (chain_id, from_chain_id, to_chain_id, block_number) in [
+        (1, 1, 42_161, 22_336_887),
+        (1, 1, 46, 22_363_073),
+        (46, 46, 1, 23_738_310),
+    ] {
+        let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata("accepted-log"),
+            msg_hash: "0xmsg".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 8,
+            from_chain_id,
+            from: "0xfrom".to_owned(),
+            to_chain_id,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        });
+        accepted.chain_id = chain_id;
+        accepted.block_number = block_number;
+        let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("assigned-log"),
+            msg_hash: "0xmsg".to_owned(),
+            oracle: LEGACY_B49E_ORACLE.to_owned(),
+            relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+            oracle_fee: 11,
+            relayer_fee: 22,
+            params: "0xparams".to_owned(),
+        });
+
+        let updated = apply_assignment_to_accepted(
+            &mut accepted,
+            &assigned,
+            &AssignmentConfig::legacy_defaults(),
+        );
+
+        assert!(
+            !updated.oracle,
+            "unexpected b49e oracle backfill for chain {chain_id}, from {from_chain_id}, to {to_chain_id}, block {block_number}"
+        );
+        assert_eq!(accepted.oracle, None);
+        assert_eq!(accepted.oracle_assigned, None);
+        assert_eq!(accepted.oracle_assigned_fee, None);
+    }
 }
 
 #[test]

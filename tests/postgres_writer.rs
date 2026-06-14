@@ -32,8 +32,8 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(written, events.len());
     assert_eq!(repeated, events.len());
     assert_table_count(&pool, "ormp_hash_imported", 1).await;
-    assert_table_count(&pool, "ormp_message_accepted", 1).await;
-    assert_table_count(&pool, "ormp_message_assigned", 3).await;
+    assert_table_count(&pool, "ormp_message_accepted", 3).await;
+    assert_table_count(&pool, "ormp_message_assigned", 5).await;
     assert_table_count(&pool, "ormp_message_dispatched", 1).await;
     assert_table_count(&pool, "msgport_message_recv", 1).await;
     assert_table_count(&pool, "msgport_message_sent", 1).await;
@@ -66,6 +66,19 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(accepted.3.as_deref(), Some(ADDRESS_RELAYER[0]));
     assert_eq!(accepted.4, Some(true));
     assert_eq!(accepted.5.as_deref(), Some("22"));
+
+    let b49e_positive = assignment_fields(&pool, "0xb49e-positive").await;
+    assert_eq!(
+        b49e_positive.0.as_deref(),
+        Some("0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e")
+    );
+    assert_eq!(b49e_positive.1, Some(true));
+    assert_eq!(b49e_positive.2.as_deref(), Some("2000000000000"));
+
+    let b49e_negative = assignment_fields(&pool, "0xb49e-negative").await;
+    assert_eq!(b49e_negative.0, None);
+    assert_eq!(b49e_negative.1, None);
+    assert_eq!(b49e_negative.2, None);
 
     let writer = PostgresEventWriter::new(pool.clone());
     writer
@@ -134,6 +147,30 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             gas_limit: 500_000,
             encoded: "0xencoded".to_owned(),
         },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata_at("b49e-positive-log", 1, 22_474_070),
+            msg_hash: "0xb49e-positive".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 9,
+            from_chain_id: 1,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 46,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata_at("b49e-negative-log", 1, 22_336_887),
+            msg_hash: "0xb49e-negative".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 10,
+            from_chain_id: 1,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 42_161,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
         LegacyOrmPEvent::MessageAssigned {
             metadata: evm_metadata("assigned-log"),
             msg_hash: "0xaccepted".to_owned(),
@@ -159,6 +196,24 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
             relayer: ADDRESS_RELAYER[0].to_owned(),
             oracle_fee: 55,
             relayer_fee: 66,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("b49e-positive-assigned-log"),
+            msg_hash: "0xb49e-positive".to_owned(),
+            oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 2_000_000_000_000,
+            relayer_fee: 44,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("b49e-negative-assigned-log"),
+            msg_hash: "0xb49e-negative".to_owned(),
+            oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+            relayer: "0x0000000000000000000000000000000000000002".to_owned(),
+            oracle_fee: 40_000_000_000_000,
+            relayer_fee: 44,
             params: "0xparams".to_owned(),
         },
         LegacyOrmPEvent::MessageDispatched {
@@ -195,11 +250,15 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
 }
 
 fn evm_metadata(id: &str) -> ChainLogMetadata {
+    evm_metadata_at(id, 46, 123)
+}
+
+fn evm_metadata_at(id: &str, chain_id: u128, block_number: u128) -> ChainLogMetadata {
     ChainLogMetadata {
         id: id.to_owned(),
         source: EventSource::Evm,
-        chain_id: 46,
-        block_number: 123,
+        chain_id,
+        block_number,
         block_hash: None,
         block_timestamp: 456,
         transaction_hash: "0xtx".to_owned(),
@@ -208,6 +267,21 @@ fn evm_metadata(id: &str) -> ChainLogMetadata {
         contract_address: "0xport".to_owned(),
         transaction_from: Some("0xsender".to_owned()),
     }
+}
+
+async fn assignment_fields(
+    pool: &PgPool,
+    msg_hash: &str,
+) -> (Option<String>, Option<bool>, Option<String>) {
+    sqlx::query_as::<_, (Option<String>, Option<bool>, Option<String>)>(
+        r#"SELECT oracle, oracle_assigned, oracle_assigned_fee::TEXT
+           FROM ormp_message_accepted
+           WHERE id = $1"#,
+    )
+    .bind(msg_hash)
+    .fetch_one(pool)
+    .await
+    .expect("fetch accepted assignment fields")
 }
 
 async fn assert_table_count(pool: &PgPool, table: &str, expected: i64) {

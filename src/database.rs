@@ -5,9 +5,10 @@ use crate::{
     checkpoint::CheckpointStore,
     config::SecretString,
     schema::{
-        AssignmentConfig, EventSource, LegacyOrmPEvent, MsgportMessageRecvRow,
-        MsgportMessageSentRow, OrmpHashImportedRow, OrmpMessageAcceptedRow, OrmpMessageAssignedRow,
-        OrmpMessageDispatchedRow, SignaturePubSignatureSubmittionRow,
+        AssignmentConfig, EventSource, LEGACY_B49E_ORACLE, LEGACY_B49E_ORACLE_FROM_BLOCK,
+        LegacyOrmPEvent, MsgportMessageRecvRow, MsgportMessageSentRow, OrmpHashImportedRow,
+        OrmpMessageAcceptedRow, OrmpMessageAssignedRow, OrmpMessageDispatchedRow,
+        SignaturePubSignatureSubmittionRow,
     },
 };
 
@@ -343,19 +344,21 @@ async fn backfill_message_assignment(
     row: &OrmpMessageAssignedRow,
     assignment_config: &AssignmentConfig,
 ) -> anyhow::Result<()> {
-    let oracle_match = contains_address(&assignment_config.oracle_addresses, &row.oracle);
+    let legacy_b49e_oracle_match = row.oracle.eq_ignore_ascii_case(LEGACY_B49E_ORACLE);
+    let oracle_match = contains_address(&assignment_config.oracle_addresses, &row.oracle)
+        && !legacy_b49e_oracle_match;
     let relayer_match = contains_address(&assignment_config.relayer_addresses, &row.relayer);
 
-    if !oracle_match && !relayer_match {
+    if !oracle_match && !legacy_b49e_oracle_match && !relayer_match {
         return Ok(());
     }
 
     sqlx::query(
         "UPDATE ormp_message_accepted
          SET
-            oracle = CASE WHEN $2 THEN $3 ELSE oracle END,
-            oracle_assigned = CASE WHEN $2 THEN TRUE ELSE oracle_assigned END,
-            oracle_assigned_fee = CASE WHEN $2 THEN $4::NUMERIC ELSE oracle_assigned_fee END,
+            oracle = CASE WHEN $2 OR ($8 AND chain_id = 1 AND from_chain_id = 1 AND to_chain_id = 46 AND block_number >= $9::NUMERIC) THEN $3 ELSE oracle END,
+            oracle_assigned = CASE WHEN $2 OR ($8 AND chain_id = 1 AND from_chain_id = 1 AND to_chain_id = 46 AND block_number >= $9::NUMERIC) THEN TRUE ELSE oracle_assigned END,
+            oracle_assigned_fee = CASE WHEN $2 OR ($8 AND chain_id = 1 AND from_chain_id = 1 AND to_chain_id = 46 AND block_number >= $9::NUMERIC) THEN $4::NUMERIC ELSE oracle_assigned_fee END,
             relayer = CASE WHEN $5 THEN $6 ELSE relayer END,
             relayer_assigned = CASE WHEN $5 THEN TRUE ELSE relayer_assigned END,
             relayer_assigned_fee = CASE WHEN $5 THEN $7::NUMERIC ELSE relayer_assigned_fee END
@@ -368,6 +371,8 @@ async fn backfill_message_assignment(
     .bind(relayer_match)
     .bind(&row.relayer)
     .bind(row.relayer_fee.to_string())
+    .bind(legacy_b49e_oracle_match)
+    .bind(LEGACY_B49E_ORACLE_FROM_BLOCK.to_string())
     .execute(&mut **tx)
     .await
     .context("backfill ormp_message_accepted assignment fields")?;

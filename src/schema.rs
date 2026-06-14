@@ -156,8 +156,10 @@ pub const ADDRESS_RELAYER: &[&str] = &[
 pub const ADDRESS_ORACLE: &[&str] = &[
     "0x8d8a2bd991c1d900c59a82a2eeb0df44e0671aab",
     "0x2cdc7178013de451ed99607ac15def6bab8c37e6",
-    "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e",
 ];
+
+pub const LEGACY_B49E_ORACLE: &str = "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e";
+pub const LEGACY_B49E_ORACLE_FROM_BLOCK: u128 = 22_474_070;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignmentConfig {
@@ -204,7 +206,7 @@ pub fn apply_assignment_to_accepted(
         update.relayer = true;
     }
 
-    if contains_address(&config.oracle_addresses, &assigned.oracle) {
+    if is_oracle_assignment_for_accepted(accepted, assigned, config) {
         accepted.oracle = Some(assigned.oracle.clone());
         accepted.oracle_assigned = Some(true);
         accepted.oracle_assigned_fee = Some(assigned.oracle_fee);
@@ -212,6 +214,20 @@ pub fn apply_assignment_to_accepted(
     }
 
     update
+}
+
+pub fn is_oracle_assignment_for_accepted(
+    accepted: &OrmpMessageAcceptedRow,
+    assigned: &OrmpMessageAssignedRow,
+    config: &AssignmentConfig,
+) -> bool {
+    (contains_address(&config.oracle_addresses, &assigned.oracle)
+        && !assigned.oracle.eq_ignore_ascii_case(LEGACY_B49E_ORACLE))
+        || (assigned.oracle.eq_ignore_ascii_case(LEGACY_B49E_ORACLE)
+            && accepted.chain_id == 1
+            && accepted.from_chain_id == 1
+            && accepted.to_chain_id == 46
+            && accepted.block_number >= LEGACY_B49E_ORACLE_FROM_BLOCK)
 }
 
 fn contains_address(addresses: &[String], candidate: &str) -> bool {
