@@ -1,7 +1,8 @@
 use ormpindexer::{
     datalens::{
         DatalensFailureKind, DatalensLog, classify_datalens_failure_message, evm_chain_name,
-        logs_from_native_query_payload, native_graphql_request, tron_chain_name,
+        logs_from_native_query_payload, native_graphql_request, native_graphql_transaction_request,
+        transactions_from_native_query_payload, tron_chain_name,
     },
     planner::TRON_CHAIN_ID,
 };
@@ -111,6 +112,49 @@ fn test_native_query_rows_decode_with_context_metadata() {
     assert_eq!(logs[0].transaction_from, None);
     assert_eq!(logs[0].topics, vec!["0xtopic"]);
     assert_eq!(logs[0].data, "0xdata");
+}
+
+#[test]
+fn test_evm_transaction_query_uses_transactions_dataset_and_decodes_senders() {
+    let request =
+        native_graphql_transaction_request(&ormpindexer::datalens::DatalensTransactionQuery {
+            chain_id: 46,
+            from_block: 100,
+            to_block: 110,
+            finality_mode: ormpindexer::config::FinalityMode::Durable,
+        })
+        .expect("build transaction request");
+    let input = &request["variables"]["input"];
+
+    assert_eq!(
+        input["datasetKey"],
+        serde_json::json!({"family": "evm", "name": "transactions"})
+    );
+    assert_eq!(input["selector"], serde_json::json!({"kind": "all"}));
+
+    let transactions = transactions_from_native_query_payload(
+        &serde_json::json!({
+            "data": {
+                "query": {
+                    "rows": {
+                        "dataset": "transactions",
+                        "rows": [{
+                            "hash": "0xtx",
+                            "block_number": 123,
+                            "from": "0xsender"
+                        }]
+                    }
+                }
+            }
+        }),
+        46,
+    )
+    .expect("decode transaction rows");
+
+    assert_eq!(transactions.len(), 1);
+    assert_eq!(transactions[0].hash, "0xtx");
+    assert_eq!(transactions[0].block_number, 123);
+    assert_eq!(transactions[0].from, "0xsender");
 }
 
 #[test]

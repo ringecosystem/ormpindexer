@@ -67,12 +67,44 @@ pub struct DatalensLogQueryResult {
     pub logs: Vec<DatalensLog>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatalensTransactionQuery {
+    pub chain_id: u64,
+    pub from_block: u64,
+    pub to_block: u64,
+    pub finality_mode: FinalityMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+pub struct DatalensTransaction {
+    #[serde(alias = "transaction_hash")]
+    pub hash: String,
+    #[serde(alias = "blockNumber")]
+    pub block_number: u64,
+    #[serde(alias = "transaction_from")]
+    pub from: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatalensTransactionQueryResult {
+    pub transactions: Vec<DatalensTransaction>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait DatalensLogReader {
     async fn latest_block(&self, chain_id: u64, finality_mode: FinalityMode)
     -> anyhow::Result<u64>;
 
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult>;
+
+    async fn query_transactions(
+        &self,
+        _query: DatalensTransactionQuery,
+    ) -> anyhow::Result<DatalensTransactionQueryResult> {
+        Ok(DatalensTransactionQueryResult {
+            transactions: Vec::new(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -335,6 +367,38 @@ impl DatalensLogReader for DatalensHttpClient {
         let logs = logs_from_native_query_payload(&payload, query.chain_id)?;
         Ok(DatalensLogQueryResult { logs })
     }
+
+    async fn query_transactions(
+        &self,
+        query: DatalensTransactionQuery,
+    ) -> anyhow::Result<DatalensTransactionQueryResult> {
+        let request = native_graphql_transaction_request(&query)?;
+        let endpoint = self.native_graphql_endpoint();
+        let body = self
+            .request_text_with_retries(
+                "Datalens transaction query",
+                || {
+                    let mut builder = self
+                        .http
+                        .post(&endpoint)
+                        .header("x-datalens-application", &self.config.application)
+                        .json(&request);
+                    if let Some(token) = &self.config.token {
+                        builder = builder.bearer_auth(token.expose_secret());
+                    }
+                    builder
+                },
+                body_has_retryable_graphql_errors,
+            )
+            .await?;
+        let payload: serde_json::Value = serde_json::from_str(&body)?;
+        if let Some(errors) = payload.get("errors") {
+            anyhow::bail!("Datalens transaction query returned errors: {errors}");
+        }
+
+        let transactions = transactions_from_native_query_payload(&payload, query.chain_id)?;
+        Ok(DatalensTransactionQueryResult { transactions })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -511,6 +575,25 @@ pub fn native_graphql_request(query: &DatalensLogQuery) -> anyhow::Result<serde_
     }))
 }
 
+pub fn native_graphql_transaction_request(
+    query: &DatalensTransactionQuery,
+) -> anyhow::Result<serde_json::Value> {
+    let input = evm_transaction_query_input(query)?;
+
+    Ok(json!({
+        "query": r#"
+            query OrmpIndexerTransactions($input: QueryInput!) {
+              query(input: $input) {
+                rows
+              }
+            }
+        "#,
+        "variables": {
+            "input": input
+        }
+    }))
+}
+
 pub fn logs_from_native_query_payload(
     payload: &serde_json::Value,
     chain_id: u64,
@@ -533,8 +616,29 @@ pub fn logs_from_native_query_payload(
         .collect()
 }
 
+pub fn transactions_from_native_query_payload(
+    payload: &serde_json::Value,
+    chain_id: u64,
+) -> anyhow::Result<Vec<DatalensTransaction>> {
+    if chain_id == TRON_CHAIN_ID {
+        anyhow::bail!("Datalens EVM transaction query does not support Tron chain {chain_id}");
+    }
+
+    let rows = payload
+        .pointer("/data/query/rows")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    native_transaction_rows(&rows)
+}
+
 fn native_log_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<NativeLogRow>> {
     let rows = native_rows(rows).context("Datalens native query response missing evm log rows")?;
+    Ok(serde_json::from_value(rows.clone())?)
+}
+
+fn native_transaction_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<DatalensTransaction>> {
+    let rows =
+        native_rows(rows).context("Datalens native query response missing evm transaction rows")?;
     Ok(serde_json::from_value(rows.clone())?)
 }
 
@@ -686,6 +790,33 @@ fn evm_query_input(query: &DatalensLogQuery) -> anyhow::Result<serde_json::Value
                 "addresses": query.contracts,
                 "topics": topic_filters(&query.topics),
             },
+        },
+        "range": {
+            "kind": "block",
+            "start": query.from_block,
+            "end": query.to_block,
+        },
+        "finality": native_finality(query.finality_mode),
+        "fields": {},
+    }))
+}
+
+fn evm_transaction_query_input(
+    query: &DatalensTransactionQuery,
+) -> anyhow::Result<serde_json::Value> {
+    let chain_name = evm_chain_name(query.chain_id)?;
+    Ok(json!({
+        "chain": {
+            "family": { "kind": "evm" },
+            "configuredName": chain_name,
+            "networkId": { "numeric": query.chain_id },
+        },
+        "datasetKey": {
+            "family": "evm",
+            "name": "transactions",
+        },
+        "selector": {
+            "kind": "all",
         },
         "range": {
             "kind": "block",

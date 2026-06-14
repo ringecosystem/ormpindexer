@@ -243,6 +243,74 @@ fn test_decode_native_graphql_log_preserves_metadata_in_legacy_row() {
 }
 
 #[test]
+fn test_decode_evm_log_normalizes_second_timestamps_to_milliseconds() {
+    let seconds_log = DatalensLog {
+        block_timestamp: Some(1_700_000_000),
+        ..log(
+            MSGPORT_MESSAGE_RECV_TOPIC,
+            MSGPORT_ADDRESS,
+            encode(&[
+                Token::FixedBytes(bytes32(0x33)),
+                Token::Bool(false),
+                Token::Bytes(vec![0xff]),
+            ]),
+        )
+    };
+    let millis_log = DatalensLog {
+        block_timestamp: Some(1_700_000_000_000),
+        ..log(
+            MSGPORT_MESSAGE_RECV_TOPIC,
+            MSGPORT_ADDRESS,
+            encode(&[
+                Token::FixedBytes(bytes32(0x33)),
+                Token::Bool(false),
+                Token::Bytes(vec![0xff]),
+            ]),
+        )
+    };
+
+    let seconds_row = MsgportMessageSentRow::from_event(
+        decode_evm_log(&DatalensLog {
+            topics: vec![MSGPORT_MESSAGE_SENT_TOPIC.to_owned()],
+            data: format!(
+                "0x{}",
+                hex::encode(encode(&[
+                    Token::FixedBytes(bytes32(0x33)),
+                    Token::Address(address(0x30)),
+                    Token::Uint(U256::from(42161)),
+                    Token::Address(address(0x31)),
+                    Token::Bytes(vec![0xaa]),
+                    Token::Bytes(vec![0xbb, 0xcc]),
+                ]))
+            ),
+            ..seconds_log
+        })
+        .expect("decode seconds timestamp"),
+    );
+    let millis_row = MsgportMessageSentRow::from_event(
+        decode_evm_log(&DatalensLog {
+            topics: vec![MSGPORT_MESSAGE_SENT_TOPIC.to_owned()],
+            data: format!(
+                "0x{}",
+                hex::encode(encode(&[
+                    Token::FixedBytes(bytes32(0x33)),
+                    Token::Address(address(0x30)),
+                    Token::Uint(U256::from(42161)),
+                    Token::Address(address(0x31)),
+                    Token::Bytes(vec![0xaa]),
+                    Token::Bytes(vec![0xbb, 0xcc]),
+                ]))
+            ),
+            ..millis_log
+        })
+        .expect("decode millis timestamp"),
+    );
+
+    assert_eq!(seconds_row.block_timestamp, 1_700_000_000_000);
+    assert_eq!(millis_row.block_timestamp, 1_700_000_000_000);
+}
+
+#[test]
 fn test_decode_evm_indexed_topics_preserves_legacy_fields() {
     let msg_hash = bytes32(0x44);
     let hash_imported = DatalensLog {
