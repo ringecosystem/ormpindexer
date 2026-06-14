@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT"
 publish = false
 
+[features]
+default = ["legacy-query-compat"]
+legacy-query-compat = []
+
 [dependencies]
 anyhow = "1.0.100"
 async-graphql = "7.0.17"
