@@ -160,6 +160,7 @@ pub const ADDRESS_ORACLE: &[&str] = &[
 
 pub const LEGACY_B49E_ORACLE: &str = "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e";
 pub const LEGACY_B49E_ORACLE_FROM_BLOCK: u128 = 22_474_070;
+pub const LEGACY_B49E_DARWINIA_FROM_BLOCK: u128 = 6_634_860;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignmentConfig {
@@ -224,10 +225,13 @@ pub fn is_oracle_assignment_for_accepted(
     (contains_address(&config.oracle_addresses, &assigned.oracle)
         && !assigned.oracle.eq_ignore_ascii_case(LEGACY_B49E_ORACLE))
         || (assigned.oracle.eq_ignore_ascii_case(LEGACY_B49E_ORACLE)
-            && accepted.chain_id == 1
-            && accepted.from_chain_id == 1
-            && accepted.to_chain_id == 46
-            && accepted.block_number >= LEGACY_B49E_ORACLE_FROM_BLOCK)
+            && ((accepted.chain_id == 1
+                && accepted.from_chain_id == 1
+                && accepted.to_chain_id == 46
+                && accepted.block_number >= LEGACY_B49E_ORACLE_FROM_BLOCK)
+                || (accepted.chain_id == 46
+                    && accepted.from_chain_id == 46
+                    && accepted.block_number >= LEGACY_B49E_DARWINIA_FROM_BLOCK)))
 }
 
 fn contains_address(addresses: &[String], candidate: &str) -> bool {
