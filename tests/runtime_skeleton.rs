@@ -8,10 +8,14 @@ use ormpindexer::{
     checkpoint::{Checkpoint, CheckpointStore, InMemoryCheckpointStore, plan_next_range},
     config::{FinalityMode, RuntimeConfig},
     database::{DryRunEventWriter, EventWriter},
-    datalens::{DatalensLog, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader},
-    decoder::NoopDecoder,
+    datalens::{
+        DatalensLog, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
+        DatalensTransaction, DatalensTransactionQuery, DatalensTransactionQueryResult,
+    },
+    decoder::{EventDecoder, NoopDecoder},
+    planner::MSGPORT_MESSAGE_SENT_TOPIC,
     runner::{IndexerRunner, RunnerReport},
-    schema::LegacyOrmPEvent,
+    schema::{ChainLogMetadata, EventSource, LegacyOrmPEvent},
 };
 
 #[test]
@@ -379,6 +383,81 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
         }
     );
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
+}
+
+#[tokio::test]
+async fn test_runner_enriches_evm_logs_with_transaction_senders() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let tx_hash = format!("0x{}", "aa".repeat(32));
+    let reader = RecordingDatalensReader::new(vec![DatalensLog {
+        id: Some("46-12-0".to_owned()),
+        chain_id: 46,
+        block_number: 12,
+        block_hash: None,
+        block_timestamp: Some(1_700_000_000_000),
+        transaction_hash: tx_hash.trim_start_matches("0x").to_ascii_uppercase(),
+        transaction_index: Some(0),
+        log_index: 1,
+        address: "0x333".to_owned(),
+        transaction_from: None,
+        topics: vec![MSGPORT_MESSAGE_SENT_TOPIC.to_owned()],
+        data: "0x".to_owned(),
+        event_name: None,
+        event_signature: None,
+        indexed_fields: Vec::new(),
+        non_indexed_fields: None,
+    }])
+    .with_head(46, 15)
+    .with_transactions(vec![DatalensTransaction {
+        hash: tx_hash,
+        block_number: 12,
+        from: "0xsender".to_owned(),
+    }]);
+    let tx_queries = reader.transaction_queries();
+    let writer = RecordingEventWriter::default();
+    let runner = IndexerRunner::new(
+        config,
+        reader,
+        InMemoryCheckpointStore::default(),
+        EchoTransactionFromDecoder,
+        writer.clone(),
+    );
+
+    runner.run_once().await.expect("batch pass succeeds");
+
+    let events = writer.events();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        LegacyOrmPEvent::MsgportMessageSent { metadata, .. } => {
+            assert_eq!(metadata.transaction_from.as_deref(), Some("0xsender"));
+        }
+        _ => panic!("expected MsgportMessageSent event"),
+    }
+    assert_eq!(
+        tx_queries
+            .lock()
+            .expect("transaction queries lock")
+            .as_slice(),
+        &[DatalensTransactionQuery {
+            chain_id: 46,
+            from_block: 12,
+            to_block: 12,
+            finality_mode: FinalityMode::Finalized,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -991,28 +1070,41 @@ async fn test_runner_loop_recovers_chain_errors_without_blocking_other_chains() 
 #[derive(Clone)]
 struct RecordingDatalensReader {
     logs: Vec<DatalensLog>,
+    transactions: Vec<DatalensTransaction>,
     heads: BTreeMap<u64, u64>,
     query_delays: BTreeMap<u64, Duration>,
     query_failures: BTreeMap<u64, String>,
     range_query_failures: BTreeMap<(u64, u64, u64), String>,
     queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
+    transaction_queries: Arc<Mutex<Vec<DatalensTransactionQuery>>>,
 }
 
 impl RecordingDatalensReader {
     fn new(logs: Vec<DatalensLog>) -> Self {
         Self {
             logs,
+            transactions: Vec::new(),
             heads: BTreeMap::new(),
             query_delays: BTreeMap::new(),
             query_failures: BTreeMap::new(),
             range_query_failures: BTreeMap::new(),
             queries: Arc::new(Mutex::new(Vec::new())),
+            transaction_queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn with_head(mut self, chain_id: u64, head: u64) -> Self {
         self.heads.insert(chain_id, head);
         self
+    }
+
+    fn with_transactions(mut self, transactions: Vec<DatalensTransaction>) -> Self {
+        self.transactions = transactions;
+        self
+    }
+
+    fn transaction_queries(&self) -> Arc<Mutex<Vec<DatalensTransactionQuery>>> {
+        self.transaction_queries.clone()
     }
 
     fn with_query_delay(mut self, chain_id: u64, delay: Duration) -> Self {
@@ -1067,6 +1159,76 @@ impl DatalensLogReader for RecordingDatalensReader {
         Ok(DatalensLogQueryResult {
             logs: self.logs.clone(),
         })
+    }
+
+    async fn query_transactions(
+        &self,
+        query: DatalensTransactionQuery,
+    ) -> anyhow::Result<DatalensTransactionQueryResult> {
+        self.transaction_queries
+            .lock()
+            .expect("transaction queries lock")
+            .push(query.clone());
+        Ok(DatalensTransactionQueryResult {
+            transactions: self
+                .transactions
+                .iter()
+                .filter(|transaction| {
+                    transaction.block_number >= query.from_block
+                        && transaction.block_number <= query.to_block
+                })
+                .cloned()
+                .collect(),
+        })
+    }
+}
+
+struct EchoTransactionFromDecoder;
+
+impl EventDecoder for EchoTransactionFromDecoder {
+    async fn decode(&self, log: &DatalensLog) -> anyhow::Result<Vec<LegacyOrmPEvent>> {
+        Ok(vec![LegacyOrmPEvent::MsgportMessageSent {
+            metadata: ChainLogMetadata {
+                id: log.id.clone().expect("test log id"),
+                source: EventSource::Evm,
+                chain_id: log.chain_id.into(),
+                block_number: log.block_number.into(),
+                block_hash: log.block_hash.clone(),
+                block_timestamp: log.block_timestamp.expect("test timestamp").into(),
+                transaction_hash: log.transaction_hash.clone(),
+                transaction_index: log.transaction_index.expect("test transaction index"),
+                log_index: i32::try_from(log.log_index).expect("test log index"),
+                contract_address: log.address.clone(),
+                transaction_from: log.transaction_from.clone(),
+            },
+            msg_id: "0xmsgid".to_owned(),
+            from_dapp: "0xfromdapp".to_owned(),
+            to_chain_id: 1,
+            to_dapp: "0xtodapp".to_owned(),
+            message: "0xmessage".to_owned(),
+            params: "0xparams".to_owned(),
+        }])
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingEventWriter {
+    events: Arc<Mutex<Vec<LegacyOrmPEvent>>>,
+}
+
+impl RecordingEventWriter {
+    fn events(&self) -> Vec<LegacyOrmPEvent> {
+        self.events.lock().expect("events lock").clone()
+    }
+}
+
+impl EventWriter for RecordingEventWriter {
+    async fn write_events(&self, events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
+        self.events
+            .lock()
+            .expect("events lock")
+            .extend_from_slice(events);
+        Ok(events.len())
     }
 }
 

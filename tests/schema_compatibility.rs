@@ -76,6 +76,122 @@ fn test_assigned_backfills_accepted_when_configured_addresses_match() {
 }
 
 #[test]
+fn test_legacy_oracle_allowlist_matches_verified_endpoint_behavior() {
+    let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+        metadata: evm_metadata("accepted-log"),
+        msg_hash: "0x01e4449fa917170d8f95cbefd3c854a04e503b5ba13485c3e2278087f88e3373".to_owned(),
+        channel: "0xchannel".to_owned(),
+        index: 8,
+        from_chain_id: 1,
+        from: "0xfrom".to_owned(),
+        to_chain_id: 46,
+        to: "0xto".to_owned(),
+        gas_limit: 500_000,
+        encoded: "0xencoded".to_owned(),
+    });
+    let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+        metadata: evm_metadata("assigned-log"),
+        msg_hash: accepted.id.clone(),
+        oracle: "0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e".to_owned(),
+        relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+        oracle_fee: 11,
+        relayer_fee: 22,
+        params: "0xparams".to_owned(),
+    });
+
+    let updated = apply_assignment_to_accepted(
+        &mut accepted,
+        &assigned,
+        &AssignmentConfig::legacy_defaults(),
+    );
+
+    assert!(updated.oracle);
+    assert!(!updated.relayer);
+    assert_eq!(
+        accepted.oracle.as_deref(),
+        Some("0xb49e82067a54b3e8c5d9db2f378fdb6892c04d2e")
+    );
+    assert_eq!(accepted.oracle_assigned, Some(true));
+    assert_eq!(accepted.oracle_assigned_fee, Some(11));
+
+    let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+        metadata: evm_metadata("accepted-log-2"),
+        msg_hash: "0xother".to_owned(),
+        channel: "0xchannel".to_owned(),
+        index: 9,
+        from_chain_id: 1,
+        from: "0xfrom".to_owned(),
+        to_chain_id: 46,
+        to: "0xto".to_owned(),
+        gas_limit: 500_000,
+        encoded: "0xencoded".to_owned(),
+    });
+    let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+        metadata: evm_metadata("assigned-log-2"),
+        msg_hash: accepted.id.clone(),
+        oracle: "0xbe01b76ab454ae2497ae43168b1f70c92ac1c726".to_owned(),
+        relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+        oracle_fee: 33,
+        relayer_fee: 44,
+        params: "0xparams".to_owned(),
+    });
+
+    let updated = apply_assignment_to_accepted(
+        &mut accepted,
+        &assigned,
+        &AssignmentConfig::legacy_defaults(),
+    );
+
+    assert!(updated.oracle);
+    assert_eq!(
+        accepted.oracle.as_deref(),
+        Some("0xbe01b76ab454ae2497ae43168b1f70c92ac1c726")
+    );
+    assert_eq!(accepted.oracle_assigned_fee, Some(33));
+}
+
+#[test]
+fn test_unverified_oracles_do_not_backfill_unconditionally() {
+    for oracle in [
+        "0xd250c974cbe8eea25ab75c0fc9a18d612ae4b043",
+        "0x985bddbc7e66964f131e3161ba8864f481cbcb2d",
+    ] {
+        let mut accepted = OrmpMessageAcceptedRow::from_event(LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata("accepted-log"),
+            msg_hash: "0xmsg".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 8,
+            from_chain_id: 1,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 46,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        });
+        let assigned = OrmpMessageAssignedRow::from_event(LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("assigned-log"),
+            msg_hash: "0xmsg".to_owned(),
+            oracle: oracle.to_owned(),
+            relayer: "0x0000000000000000000000000000000000000001".to_owned(),
+            oracle_fee: 11,
+            relayer_fee: 22,
+            params: "0xparams".to_owned(),
+        });
+
+        let updated = apply_assignment_to_accepted(
+            &mut accepted,
+            &assigned,
+            &AssignmentConfig::legacy_defaults(),
+        );
+
+        assert!(!updated.oracle, "unexpected oracle backfill for {oracle}");
+        assert_eq!(accepted.oracle, None);
+        assert_eq!(accepted.oracle_assigned, None);
+        assert_eq!(accepted.oracle_assigned_fee, None);
+    }
+}
+
+#[test]
 fn test_msgport_sent_and_recv_preserve_event_metadata() {
     let sent_metadata = ChainLogMetadata {
         id: "42161-466386813-0x0f1e4961852aada25e6fda15c4883c7512e2f14c584e0d0917b03d9758682a57-14"

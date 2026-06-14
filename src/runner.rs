@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::{Duration, Instant},
+};
 
 use tokio::time::sleep;
 
@@ -11,10 +14,10 @@ use crate::{
     database::EventWriter,
     datalens::{
         DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
-        classify_datalens_failure_message,
+        DatalensTransactionQuery, classify_datalens_failure_message,
     },
     decoder::EventDecoder,
-    planner::chain_dataset,
+    planner::{MSGPORT_MESSAGE_SENT_TOPIC, TRON_CHAIN_ID, chain_dataset},
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -325,8 +328,12 @@ where
         batch_started: Instant,
         result: DatalensLogQueryResult,
     ) -> anyhow::Result<ProcessedRangeReport> {
+        let records_read = result.logs.len();
+        let logs = self
+            .enrich_logs_with_transaction_senders(chain, result.logs)
+            .await?;
         let mut events = Vec::new();
-        for log in &result.logs {
+        for log in &logs {
             let topic0 = log
                 .topics
                 .first()
@@ -374,7 +381,7 @@ where
             range.from_block,
             range.to_block,
             target_block,
-            result.logs.len(),
+            records_read,
             events.len(),
             written,
             next_block,
@@ -388,12 +395,81 @@ where
         Ok(ProcessedRangeReport {
             next_block,
             ranges_queried: 1,
-            records_read: result.logs.len() as u64,
+            records_read: records_read as u64,
             records_decoded: events.len() as u64,
             records_written: written as u64,
             checkpoints_advanced: 1,
         })
     }
+
+    async fn enrich_logs_with_transaction_senders(
+        &self,
+        chain: &ChainConfig,
+        mut logs: Vec<crate::datalens::DatalensLog>,
+    ) -> anyhow::Result<Vec<crate::datalens::DatalensLog>> {
+        if chain.chain_id == TRON_CHAIN_ID || logs.iter().all(|log| log.transaction_from.is_some())
+        {
+            return Ok(logs);
+        }
+
+        let sender_blocks =
+            logs.iter()
+                .filter(|log| {
+                    log.transaction_from.is_none()
+                        && log.topics.first().is_some_and(|topic| {
+                            topic.eq_ignore_ascii_case(MSGPORT_MESSAGE_SENT_TOPIC)
+                        })
+                })
+                .map(|log| log.block_number)
+                .collect::<BTreeSet<_>>();
+        if sender_blocks.is_empty() {
+            return Ok(logs);
+        }
+
+        let mut transactions = Vec::new();
+        for block_number in sender_blocks {
+            transactions.extend(
+                self.reader
+                    .query_transactions(DatalensTransactionQuery {
+                        chain_id: chain.chain_id,
+                        from_block: block_number,
+                        to_block: block_number,
+                        finality_mode: self.config.finality_mode,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "query ORMP Datalens transactions chain_id={} block_number={}",
+                            chain.chain_id, block_number
+                        )
+                    })?
+                    .transactions,
+            );
+        }
+        let senders = transactions
+            .into_iter()
+            .map(|transaction| (sender_hash_key(&transaction.hash), transaction.from))
+            .collect::<HashMap<_, _>>();
+
+        for log in &mut logs {
+            if log.transaction_from.is_none() {
+                log.transaction_from = senders
+                    .get(&sender_hash_key(&log.transaction_hash))
+                    .cloned();
+            }
+        }
+
+        Ok(logs)
+    }
+}
+
+fn sender_hash_key(hash: &str) -> String {
+    let hash = hash.trim();
+    let hash = hash
+        .strip_prefix("0x")
+        .or_else(|| hash.strip_prefix("0X"))
+        .unwrap_or(hash);
+    format!("0x{}", hash.to_ascii_lowercase())
 }
 
 fn can_split_datalens_query_failure(error: &anyhow::Error, range: BlockRange) -> bool {

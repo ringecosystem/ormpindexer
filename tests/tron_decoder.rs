@@ -4,7 +4,7 @@ use ethabi::{
 };
 use ormpindexer::{
     datalens::DatalensLog,
-    decoder::decode_tron_event,
+    decoder::{EventDecoder, EvmEventDecoder, decode_tron_event},
     planner::{ORMP_MESSAGE_ACCEPTED_TOPIC, TRON_CHAIN_ID},
     schema::{EventSource, LegacyOrmPEvent, MsgportMessageSentRow},
 };
@@ -149,6 +149,56 @@ fn test_decode_tron_raw_message_accepted_from_block_scan_fields() {
             encoded: "0xabcd".to_owned(),
         }
     );
+}
+
+#[test]
+fn test_decode_tron_event_normalizes_timestamp_and_transaction_hash() {
+    let log = DatalensLog {
+        block_timestamp: Some(1_800_000_000),
+        transaction_hash: "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"
+            .to_owned(),
+        ..tron_log()
+    };
+
+    let event = decode_tron_event(&DatalensLog {
+        event_name: Some("MessageAccepted".to_owned()),
+        non_indexed_fields: Some(serde_json::json!({
+            "msgHash": bytes_hex(0x11),
+            "message": {
+                "channel": "41CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+                "index": "8",
+                "fromChainId": "46",
+                "from": "41DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+                "toChainId": "137",
+                "to": "41EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+                "gasLimit": "500000",
+                "encoded": "0xabcd"
+            }
+        })),
+        ..log
+    })
+    .expect("decode Tron event");
+
+    match event {
+        LegacyOrmPEvent::MessageAccepted { metadata, .. } => {
+            assert_eq!(metadata.block_timestamp, 1_800_000_000_000);
+            assert_eq!(
+                metadata.transaction_hash,
+                "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+            );
+        }
+        _ => panic!("expected MessageAccepted event"),
+    }
+}
+
+#[tokio::test]
+async fn test_evm_event_decoder_suppresses_tron_msgport_events() {
+    let events = EvmEventDecoder
+        .decode(&tron_log())
+        .await
+        .expect("decode Tron MessageSent through production decoder");
+
+    assert!(events.is_empty());
 }
 
 #[test]

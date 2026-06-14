@@ -34,6 +34,12 @@ pub struct EvmEventDecoder;
 impl EventDecoder for EvmEventDecoder {
     async fn decode(&self, log: &DatalensLog) -> anyhow::Result<Vec<LegacyOrmPEvent>> {
         if log.chain_id == TRON_CHAIN_ID {
+            if matches!(
+                log.event_name.as_deref(),
+                Some(TRON_MESSAGE_RECV_EVENT | TRON_MESSAGE_SENT_EVENT)
+            ) {
+                return Ok(Vec::new());
+            }
             return decode_tron_event(log).map(|event| vec![event]);
         }
 
@@ -66,6 +72,12 @@ pub fn decode_evm_log(log: &DatalensLog) -> anyhow::Result<LegacyOrmPEvent> {
 }
 
 fn evm_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
+    let block_timestamp = normalize_block_timestamp(
+        log.block_timestamp
+            .context("EVM log is missing block timestamp")?,
+    )
+    .context("EVM block timestamp overflows u64")?;
+
     Ok(ChainLogMetadata {
         id: log
             .id
@@ -75,10 +87,7 @@ fn evm_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
         chain_id: log.chain_id.into(),
         block_number: log.block_number.into(),
         block_hash: log.block_hash.clone(),
-        block_timestamp: log
-            .block_timestamp
-            .context("EVM log is missing block timestamp")?
-            .into(),
+        block_timestamp: block_timestamp.into(),
         transaction_hash: normalize_hex(&log.transaction_hash)?,
         transaction_index: log
             .transaction_index
@@ -168,6 +177,12 @@ fn tron_raw_topics(log: &DatalensLog) -> anyhow::Result<Vec<String>> {
 }
 
 fn tron_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
+    let block_timestamp = normalize_block_timestamp(
+        log.block_timestamp
+            .context("Tron event is missing block timestamp")?,
+    )
+    .context("Tron block timestamp overflows u64")?;
+
     Ok(ChainLogMetadata {
         id: log
             .id
@@ -177,11 +192,8 @@ fn tron_metadata(log: &DatalensLog) -> anyhow::Result<ChainLogMetadata> {
         chain_id: log.chain_id.into(),
         block_number: log.block_number.into(),
         block_hash: log.block_hash.clone(),
-        block_timestamp: log
-            .block_timestamp
-            .context("Tron event is missing block timestamp")?
-            .into(),
-        transaction_hash: log.transaction_hash.clone(),
+        block_timestamp: block_timestamp.into(),
+        transaction_hash: normalize_tron_transaction_hash(&log.transaction_hash),
         transaction_index: log
             .transaction_index
             .context("Tron event is missing transaction index")?,
@@ -718,6 +730,27 @@ fn normalize_hex(value: &str) -> anyhow::Result<String> {
         "invalid hex value"
     );
     Ok(format!("0x{}", value.to_ascii_lowercase()))
+}
+
+fn normalize_block_timestamp(value: u64) -> Option<u64> {
+    if (1_000_000_000..10_000_000_000).contains(&value) {
+        value.checked_mul(1_000)
+    } else {
+        Some(value)
+    }
+}
+
+fn normalize_tron_transaction_hash(value: &str) -> String {
+    let trimmed = value.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        format!("0x{}", hex.to_ascii_lowercase())
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn optional_field<'a>(

@@ -7,7 +7,7 @@ use sqlx::{PgPool, Row};
 use ormpindexer::{
     database::{EventWriter, PostgresEventWriter, apply_migrations},
     datalens::DatalensLog,
-    decoder::{decode_evm_log, decode_tron_event},
+    decoder::{EventDecoder, EvmEventDecoder, decode_evm_log},
     planner::{
         MSGPORT_ADDRESS, MSGPORT_MESSAGE_RECV_TOPIC, MSGPORT_MESSAGE_SENT_TOPIC, ORMP_ADDRESS,
         ORMP_HASH_IMPORTED_TOPIC, ORMP_MESSAGE_ACCEPTED_TOPIC, ORMP_MESSAGE_ASSIGNED_TOPIC,
@@ -31,12 +31,18 @@ fn test_evm_legacy_rows_match_subsquid_compatibility_expectations() {
     assert_eq!(compatibility_rows(&decoded), evm_expected_rows());
 }
 
-#[test]
-fn test_tron_structured_json_rows_match_subsquid_compatibility_expectations() {
-    let decoded = tron_fixture_logs()
-        .iter()
-        .map(|log| decode_tron_event(log).expect("decode Tron parity fixture"))
-        .collect::<Vec<_>>();
+#[tokio::test]
+async fn test_tron_structured_json_rows_match_subsquid_compatibility_expectations() {
+    let decoder = EvmEventDecoder;
+    let mut decoded = Vec::new();
+    for log in tron_fixture_logs() {
+        decoded.extend(
+            decoder
+                .decode(&log)
+                .await
+                .expect("decode Tron parity fixture"),
+        );
+    }
 
     assert_eq!(compatibility_rows(&decoded), tron_expected_rows());
 }
@@ -54,15 +60,19 @@ async fn test_postgres_writer_rows_match_subsquid_compatibility_expectations() {
     apply_migrations(&pool).await.expect("apply migrations");
     truncate_legacy_tables(&pool).await;
 
-    let events = evm_fixture_logs()
+    let mut events = evm_fixture_logs()
         .iter()
         .map(|log| decode_evm_log(log).expect("decode EVM parity fixture"))
-        .chain(
-            tron_fixture_logs()
-                .iter()
-                .map(|log| decode_tron_event(log).expect("decode Tron parity fixture")),
-        )
         .collect::<Vec<_>>();
+    let decoder = EvmEventDecoder;
+    for log in tron_fixture_logs() {
+        events.extend(
+            decoder
+                .decode(&log)
+                .await
+                .expect("decode Tron parity fixture"),
+        );
+    }
     let expected = legacy_expected_rows();
 
     let writer = PostgresEventWriter::new(pool.clone());
@@ -242,7 +252,6 @@ fn evm_expected_rows() -> Vec<CompatibilityRow> {
 fn tron_expected_rows() -> Vec<CompatibilityRow> {
     let msg_hash = bytes_hex(0x55);
     let hash = bytes_hex(0x66);
-    let msg_id = bytes_hex(0x33);
     let dispatch_hash = bytes_hex(0x77);
 
     let mut rows = vec![
@@ -304,37 +313,6 @@ fn tron_expected_rows() -> Vec<CompatibilityRow> {
             target_chain_id: TRON_CHAIN_ID.into(),
             msg_hash: dispatch_hash,
             dispatch_result: true,
-        }),
-        CompatibilityRow::MsgportMessageRecv(MsgportMessageRecvRow {
-            id: "0000000124-tron--000007".to_owned(),
-            block_number: 124,
-            transaction_hash: "tron-message-recv".to_owned(),
-            block_timestamp: 456_004,
-            transaction_index: 6,
-            log_index: 7,
-            chain_id: TRON_CHAIN_ID.into(),
-            port_address: "41abcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned(),
-            msg_id: msg_id.clone(),
-            result: false,
-            return_data: "0xff".to_owned(),
-        }),
-        CompatibilityRow::MsgportMessageSent(MsgportMessageSentRow {
-            id: "0000000123-tront-000003".to_owned(),
-            block_number: 123,
-            transaction_hash: "trontx".to_owned(),
-            block_timestamp: 456,
-            transaction_index: 2,
-            log_index: 3,
-            chain_id: TRON_CHAIN_ID.into(),
-            port_address: "41abcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned(),
-            transaction_from: None,
-            from_chain_id: TRON_CHAIN_ID.into(),
-            msg_id: bytes_hex(0x33),
-            from_dapp: "0x0000000000000000000000000000000000000030".to_owned(),
-            to_chain_id: 42161,
-            to_dapp: "0x0000000000000000000000000000000000000031".to_owned(),
-            message: "0xaa".to_owned(),
-            params: "0xbbcc".to_owned(),
         }),
         CompatibilityRow::SignatureSubmittion(SignaturePubSignatureSubmittionRow {
             id: "0000000126-tron--000009".to_owned(),

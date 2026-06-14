@@ -5,8 +5,8 @@ use crate::{
     checkpoint::CheckpointStore,
     config::SecretString,
     schema::{
-        AssignmentConfig, LegacyOrmPEvent, MsgportMessageRecvRow, MsgportMessageSentRow,
-        OrmpHashImportedRow, OrmpMessageAcceptedRow, OrmpMessageAssignedRow,
+        AssignmentConfig, EventSource, LegacyOrmPEvent, MsgportMessageRecvRow,
+        MsgportMessageSentRow, OrmpHashImportedRow, OrmpMessageAcceptedRow, OrmpMessageAssignedRow,
         OrmpMessageDispatchedRow, SignaturePubSignatureSubmittionRow,
     },
 };
@@ -173,15 +173,29 @@ async fn write_legacy_event(
             insert_message_dispatched(tx, OrmpMessageDispatchedRow::from_event(event)).await
         }
         LegacyOrmPEvent::MsgportMessageRecv { .. } => {
+            if event_source(&event) == Some(EventSource::Tron) {
+                return Ok(());
+            }
             insert_msgport_message_recv(tx, MsgportMessageRecvRow::from_event(event)).await
         }
         LegacyOrmPEvent::MsgportMessageSent { .. } => {
+            if event_source(&event) == Some(EventSource::Tron) {
+                return Ok(());
+            }
             insert_msgport_message_sent(tx, MsgportMessageSentRow::from_event(event)).await
         }
         LegacyOrmPEvent::SignatureSubmittion { .. } => {
             insert_signature_submittion(tx, SignaturePubSignatureSubmittionRow::from_event(event))
                 .await
         }
+    }
+}
+
+fn event_source(event: &LegacyOrmPEvent) -> Option<EventSource> {
+    match event {
+        LegacyOrmPEvent::MsgportMessageRecv { metadata, .. }
+        | LegacyOrmPEvent::MsgportMessageSent { metadata, .. } => Some(metadata.source),
+        _ => None,
     }
 }
 
