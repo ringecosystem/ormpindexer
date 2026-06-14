@@ -621,6 +621,7 @@ fn tron_log(
     .expect("decode Tron Datalens log")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evm_log(
     id: &str,
     block_number: u64,

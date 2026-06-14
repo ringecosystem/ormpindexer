@@ -452,35 +452,35 @@ fn body_has_retryable_graphql_errors(body: &str) -> bool {
 }
 
 fn graphql_error_is_retryable(error: &serde_json::Value) -> bool {
-    if let Some(message) = error.get("message").and_then(serde_json::Value::as_str) {
-        if matches!(
+    if let Some(message) = error.get("message").and_then(serde_json::Value::as_str)
+        && matches!(
             classify_datalens_failure_message(message),
             DatalensFailureKind::Transient
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
 
     let Some(extensions) = error.get("extensions") else {
         return false;
     };
 
-    if let Some(code) = extensions.get("code").and_then(serde_json::Value::as_str) {
-        if matches!(
+    if let Some(code) = extensions.get("code").and_then(serde_json::Value::as_str)
+        && matches!(
             classify_datalens_failure_message(code),
             DatalensFailureKind::Transient
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
 
-    if let Some(kind) = extensions.get("kind").and_then(serde_json::Value::as_str) {
-        if matches!(
+    if let Some(kind) = extensions.get("kind").and_then(serde_json::Value::as_str)
+        && matches!(
             classify_datalens_failure_message(kind),
             DatalensFailureKind::Transient
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
 
     ["status", "statusCode", "httpStatus"]
