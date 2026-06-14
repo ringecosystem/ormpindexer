@@ -1,7 +1,8 @@
--- ORMP legacy schema compatibility contract.
+-- ORMP indexer initial schema.
 --
--- This initializes the tables exposed by the previous Subsquid GraphQL schema.
--- It does not migrate old rows or define the future event ingestion runner.
+-- This initializes the tables exposed by the previous Subsquid GraphQL schema
+-- and the runtime checkpoint table. Schema changes are expected to reset the
+-- database rather than migrate existing indexed data.
 
 CREATE TABLE IF NOT EXISTS ormp_hash_imported (
   id VARCHAR NOT NULL PRIMARY KEY,
@@ -120,3 +121,11 @@ CREATE INDEX IF NOT EXISTS msgport_message_sent_msg_id_idx
   ON msgport_message_sent (msg_id);
 CREATE INDEX IF NOT EXISTS msgport_message_recv_msg_id_idx
   ON msgport_message_recv (msg_id);
+
+CREATE TABLE IF NOT EXISTS ormp_indexer_checkpoint (
+  chain_id NUMERIC NOT NULL,
+  dataset TEXT NOT NULL,
+  next_block NUMERIC NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (chain_id, dataset)
+);
