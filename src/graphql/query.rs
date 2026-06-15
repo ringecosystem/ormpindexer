@@ -72,7 +72,7 @@ macro_rules! query_fns {
             if limit == 0 {
                 return Ok(Vec::new());
             }
-            fetch_page(pool, $select, where_, order_by, offset, limit).await
+            fetch_page(pool, $select, $table, where_, order_by, offset, limit).await
         }
 
         pub(super) async fn $page(
@@ -87,7 +87,7 @@ macro_rules! query_fns {
             let items = if limit == 0 {
                 Vec::new()
             } else {
-                fetch_page(pool, $select, where_, order_by, offset, limit).await?
+                fetch_page(pool, $select, $table, where_, order_by, offset, limit).await?
             };
             Ok(<$page_ty>::new(total_count, offset, limit, items))
         }
@@ -171,6 +171,7 @@ where
 async fn fetch_page<T>(
     pool: &PgPool,
     select: &'static str,
+    table: &'static str,
     where_: Option<&LegacyWhereInput>,
     order_by: Option<&[LegacyOrderByInput]>,
     offset: i32,
@@ -181,7 +182,7 @@ where
 {
     let mut query = QueryBuilder::<Postgres>::new(select);
     push_where(&mut query, where_);
-    push_order_by(&mut query, order_by);
+    push_order_by(&mut query, table, order_by);
     push_page(&mut query, offset, limit);
 
     Ok(query.build_query_as().fetch_all(pool).await?)
@@ -391,41 +392,78 @@ fn push_and(query: &mut QueryBuilder<'_, Postgres>, has_condition: &mut bool) {
     *has_condition = true;
 }
 
-fn push_order_by(query: &mut QueryBuilder<'_, Postgres>, order_by: Option<&[LegacyOrderByInput]>) {
+fn push_order_by(
+    query: &mut QueryBuilder<'_, Postgres>,
+    table: &'static str,
+    order_by: Option<&[LegacyOrderByInput]>,
+) {
     let orders = order_by.unwrap_or(&[]);
     query.push(" ORDER BY ");
     if orders.is_empty() {
-        query.push("block_number ASC, id ASC");
+        query.push(format!("{table}.block_number ASC, id ASC"));
         return;
     }
     let mut separated = query.separated(", ");
     for order in orders {
-        let (column, direction) = match order {
-            LegacyOrderByInput::IdAsc => ("id", "ASC"),
-            LegacyOrderByInput::IdDesc => ("id", "DESC"),
-            LegacyOrderByInput::BlockNumberAsc => ("block_number", "ASC"),
-            LegacyOrderByInput::BlockNumberDesc => ("block_number", "DESC"),
-            LegacyOrderByInput::BlockTimestampAsc => ("block_timestamp", "ASC"),
-            LegacyOrderByInput::BlockTimestampDesc => ("block_timestamp", "DESC"),
-            LegacyOrderByInput::ChainIdAsc => ("chain_id", "ASC"),
-            LegacyOrderByInput::ChainIdDesc => ("chain_id", "DESC"),
-            LegacyOrderByInput::LogIndexAsc => ("log_index", "ASC"),
-            LegacyOrderByInput::LogIndexDesc => ("log_index", "DESC"),
-            LegacyOrderByInput::TransactionIndexAsc => ("transaction_index", "ASC"),
-            LegacyOrderByInput::TransactionIndexDesc => ("transaction_index", "DESC"),
-            LegacyOrderByInput::MsgHashAsc => ("msg_hash", "ASC"),
-            LegacyOrderByInput::MsgHashDesc => ("msg_hash", "DESC"),
-            LegacyOrderByInput::MsgIdAsc => ("msg_id", "ASC"),
-            LegacyOrderByInput::MsgIdDesc => ("msg_id", "DESC"),
+        let (column, direction, qualify) = match order {
+            LegacyOrderByInput::IdAsc => ("id", "ASC", false),
+            LegacyOrderByInput::IdDesc => ("id", "DESC", false),
+            LegacyOrderByInput::BlockNumberAsc => ("block_number", "ASC", true),
+            LegacyOrderByInput::BlockNumberDesc => ("block_number", "DESC", true),
+            LegacyOrderByInput::BlockTimestampAsc => ("block_timestamp", "ASC", true),
+            LegacyOrderByInput::BlockTimestampDesc => ("block_timestamp", "DESC", true),
+            LegacyOrderByInput::ChainIdAsc => ("chain_id", "ASC", true),
+            LegacyOrderByInput::ChainIdDesc => ("chain_id", "DESC", true),
+            LegacyOrderByInput::LogIndexAsc => ("log_index", "ASC", true),
+            LegacyOrderByInput::LogIndexDesc => ("log_index", "DESC", true),
+            LegacyOrderByInput::TransactionIndexAsc => ("transaction_index", "ASC", true),
+            LegacyOrderByInput::TransactionIndexDesc => ("transaction_index", "DESC", true),
+            LegacyOrderByInput::MsgHashAsc => ("msg_hash", "ASC", false),
+            LegacyOrderByInput::MsgHashDesc => ("msg_hash", "DESC", false),
+            LegacyOrderByInput::MsgIdAsc => ("msg_id", "ASC", false),
+            LegacyOrderByInput::MsgIdDesc => ("msg_id", "DESC", false),
             #[cfg(feature = "legacy-query-compat")]
-            LegacyOrderByInput::IndexAsc => (r#""index""#, "ASC"),
+            LegacyOrderByInput::IndexAsc => (r#""index""#, "ASC", true),
             #[cfg(feature = "legacy-query-compat")]
-            LegacyOrderByInput::IndexDesc => (r#""index""#, "DESC"),
+            LegacyOrderByInput::IndexDesc => (r#""index""#, "DESC", true),
             #[cfg(feature = "legacy-query-compat")]
-            LegacyOrderByInput::MsgIndexAsc => ("msg_index", "ASC"),
+            LegacyOrderByInput::MsgIndexAsc => ("msg_index", "ASC", true),
             #[cfg(feature = "legacy-query-compat")]
-            LegacyOrderByInput::MsgIndexDesc => ("msg_index", "DESC"),
+            LegacyOrderByInput::MsgIndexDesc => ("msg_index", "DESC", true),
         };
-        separated.push(format!("{column} {direction}"));
+        if qualify {
+            separated.push(format!("{table}.{column} {direction}"));
+        } else {
+            separated.push(format!("{column} {direction}"));
+        }
+    }
+}
+
+#[cfg(all(test, feature = "legacy-query-compat"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_push_order_by_qualifies_numeric_columns_to_avoid_text_alias_sorting() {
+        let mut query =
+            QueryBuilder::<Postgres>::new("SELECT block_number::TEXT AS block_number FROM events");
+        push_order_by(
+            &mut query,
+            "events",
+            Some(&[
+                LegacyOrderByInput::BlockNumberDesc,
+                LegacyOrderByInput::BlockTimestampDesc,
+                LegacyOrderByInput::ChainIdDesc,
+                LegacyOrderByInput::LogIndexDesc,
+                LegacyOrderByInput::TransactionIndexDesc,
+                LegacyOrderByInput::MsgIndexDesc,
+                LegacyOrderByInput::IndexDesc,
+            ]),
+        );
+
+        assert_eq!(
+            query.sql(),
+            r#"SELECT block_number::TEXT AS block_number FROM events ORDER BY events.block_number DESC, events.block_timestamp DESC, events.chain_id DESC, events.log_index DESC, events.transaction_index DESC, events.msg_index DESC, events."index" DESC"#
+        );
     }
 }
