@@ -314,6 +314,86 @@ async fn test_graphql_legacy_list_default_limit_covers_ormpipe_hash_chunks() {
     assert_eq!(rows.len(), 58);
 }
 
+#[cfg(feature = "legacy-query-compat")]
+#[tokio::test]
+async fn test_graphql_legacy_order_by_sorts_numeric_fields_numerically() {
+    let Some(database_url) = test_database_url() else {
+        eprintln!("skipping GraphQL Postgres test; ORMPINDEXER_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect test postgres");
+    apply_migrations(&pool).await.expect("apply migrations");
+    truncate_legacy_tables(&pool).await;
+    seed_numeric_order_rows(&pool).await;
+
+    let schema = build_schema(pool);
+    let response = schema
+        .execute(Request::new(
+            r#"
+            query {
+              imported: ormpHashImporteds(
+                limit: 2
+                orderBy: [msgIndex_DESC]
+                where: {
+                  srcChainId_eq: "46"
+                  targetChainId_eq: "1"
+                }
+              ) {
+                msgIndex
+              }
+              accepted: ormpMessageAccepteds(
+                limit: 2
+                orderBy: [index_DESC]
+                where: {
+                  chainId_eq: "46"
+                  toChainId_eq: "1"
+                }
+              ) {
+                index
+              }
+              blocks: ormpMessageDispatcheds(
+                limit: 2
+                orderBy: [blockNumber_DESC]
+                where: {
+                  targetChainId_eq: "1"
+                }
+              ) {
+                blockNumber
+              }
+            }
+            "#,
+        ))
+        .await;
+
+    assert!(
+        response.errors.is_empty(),
+        "unexpected GraphQL errors: {:?}",
+        response.errors
+    );
+    assert_eq!(
+        response.data.into_json().expect("GraphQL response JSON"),
+        json!({
+            "imported": [{
+                "msgIndex": "9687",
+            }, {
+                "msgIndex": "97",
+            }],
+            "accepted": [{
+                "index": "9691",
+            }, {
+                "index": "97",
+            }],
+            "blocks": [{
+                "blockNumber": "12089177",
+            }, {
+                "blockNumber": "9989983",
+            }],
+        })
+    );
+}
+
 fn legacy_events() -> Vec<LegacyOrmPEvent> {
     vec![
         LegacyOrmPEvent::MessageAccepted {
@@ -370,6 +450,47 @@ async fn truncate_legacy_tables(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("truncate legacy tables");
+}
+
+#[cfg(feature = "legacy-query-compat")]
+async fn seed_numeric_order_rows(pool: &PgPool) {
+    sqlx::query(
+        r#"INSERT INTO ormp_hash_imported (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            src_chain_id, target_chain_id, oracle, channel, msg_index, hash
+        ) VALUES
+            ('imported-97', 100, '0xtx-imported-97', 456, 46, 46, 1, '0xoracle', '0xchannel', 97, '0ximported-97'),
+            ('imported-9687', 101, '0xtx-imported-9687', 457, 46, 46, 1, '0xoracle', '0xchannel', 9687, '0ximported-9687')"#,
+    )
+    .execute(pool)
+    .await
+    .expect("insert numeric order imported rows");
+
+    sqlx::query(
+        r#"INSERT INTO ormp_message_accepted (
+            id, block_number, transaction_hash, block_timestamp, chain_id, log_index,
+            msg_hash, channel, "index", from_chain_id, "from", to_chain_id, "to",
+            gas_limit, encoded, oracle, oracle_assigned, oracle_assigned_fee,
+            relayer, relayer_assigned, relayer_assigned_fee
+        ) VALUES
+            ('accepted-97', 100, '0xtx-accepted-97', 456, 46, 3, '0xaccepted-97', '0xchannel', 97, 46, '0xfrom', 1, '0xto', 500000, '0xencoded', '0xoracle', true, 11, '0xrelayer', true, 22),
+            ('accepted-9691', 101, '0xtx-accepted-9691', 457, 46, 4, '0xaccepted-9691', '0xchannel', 9691, 46, '0xfrom', 1, '0xto', 500000, '0xencoded', '0xoracle', true, 11, '0xrelayer', true, 22)"#,
+    )
+    .execute(pool)
+    .await
+    .expect("insert numeric order accepted rows");
+
+    sqlx::query(
+        r#"INSERT INTO ormp_message_dispatched (
+            id, block_number, transaction_hash, block_timestamp, chain_id,
+            target_chain_id, msg_hash, dispatch_result
+        ) VALUES
+            ('dispatched-9989983', 9989983, '0xtx-dispatched-9989983', 456, 46, 1, '0xdispatched-9989983', true),
+            ('dispatched-12089177', 12089177, '0xtx-dispatched-12089177', 457, 46, 1, '0xdispatched-12089177', true)"#,
+    )
+    .execute(pool)
+    .await
+    .expect("insert numeric order dispatched rows");
 }
 
 #[cfg(feature = "legacy-query-compat")]
