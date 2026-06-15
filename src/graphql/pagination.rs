@@ -1,11 +1,12 @@
 use sqlx::{Postgres, QueryBuilder};
 
-pub(super) const DEFAULT_PAGE_LIMIT: i32 = 50;
+pub(super) const DEFAULT_PAGE_LIMIT: i32 = 100;
+pub(super) const MAX_PAGE_LIMIT: i32 = 1000;
 
 pub(super) fn page_args(offset: Option<i32>, limit: Option<i32>) -> (i32, i32) {
     (
         offset.unwrap_or_default().max(0),
-        limit.unwrap_or(DEFAULT_PAGE_LIMIT).max(0),
+        limit.unwrap_or(DEFAULT_PAGE_LIMIT).clamp(0, MAX_PAGE_LIMIT),
     )
 }
 
