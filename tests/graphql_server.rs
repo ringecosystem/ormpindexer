@@ -259,6 +259,61 @@ async fn test_graphql_accepts_ormpipe_legacy_query_compatibility_filters() {
     );
 }
 
+#[cfg(feature = "legacy-query-compat")]
+#[tokio::test]
+async fn test_graphql_legacy_list_default_limit_covers_ormpipe_hash_chunks() {
+    let Some(database_url) = test_database_url() else {
+        eprintln!("skipping GraphQL Postgres test; ORMPINDEXER_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect test postgres");
+    apply_migrations(&pool).await.expect("apply migrations");
+    truncate_legacy_tables(&pool).await;
+    seed_dispatched_rows(&pool, 58).await;
+
+    let hashes = (0..58)
+        .map(|index| format!("0xdispatched-{index:02}"))
+        .collect::<Vec<_>>();
+
+    let schema = build_schema(pool);
+    let response = schema
+        .execute(
+            Request::new(
+                r#"
+                query($hashes: [String!], $chainId: BigInt) {
+                  ormpMessageDispatcheds(
+                    orderBy: [blockNumber_ASC]
+                    where: {
+                      msgHash_in: $hashes
+                      targetChainId_eq: $chainId
+                    }
+                  ) {
+                    msgHash
+                  }
+                }
+                "#,
+            )
+            .variables(async_graphql::Variables::from_json(json!({
+                "hashes": hashes,
+                "chainId": "46",
+            }))),
+        )
+        .await;
+
+    assert!(
+        response.errors.is_empty(),
+        "unexpected GraphQL errors: {:?}",
+        response.errors
+    );
+    let data = response.data.into_json().expect("GraphQL response JSON");
+    let rows = data["ormpMessageDispatcheds"]
+        .as_array()
+        .expect("dispatched rows");
+    assert_eq!(rows.len(), 58);
+}
+
 fn legacy_events() -> Vec<LegacyOrmPEvent> {
     vec![
         LegacyOrmPEvent::MessageAccepted {
@@ -315,6 +370,29 @@ async fn truncate_legacy_tables(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("truncate legacy tables");
+}
+
+#[cfg(feature = "legacy-query-compat")]
+async fn seed_dispatched_rows(pool: &PgPool, count: usize) {
+    for index in 0..count {
+        let msg_hash = format!("0xdispatched-{index:02}");
+        sqlx::query(
+            r#"INSERT INTO ormp_message_dispatched (
+                id, block_number, transaction_hash, block_timestamp, chain_id,
+                target_chain_id, msg_hash, dispatch_result
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, true)"#,
+        )
+        .bind(format!("dispatched-{index:02}"))
+        .bind(1_000_i64 + index as i64)
+        .bind(format!("0xtx-dispatched-{index:02}"))
+        .bind(2_000_i64 + index as i64)
+        .bind(1_i64)
+        .bind(46_i64)
+        .bind(msg_hash)
+        .execute(pool)
+        .await
+        .expect("insert dispatched row");
+    }
 }
 
 #[cfg(feature = "legacy-query-compat")]
