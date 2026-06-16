@@ -64,11 +64,13 @@ impl QueryRoot {
     async fn ormp_message_accepteds(
         &self,
         ctx: &Context<'_>,
-        where_: Option<LegacyWhereInput>,
-        order_by: Option<Vec<LegacyOrderByInput>>,
+        where_: Option<ORMPMessageAcceptedWhereInput>,
+        order_by: Option<Vec<ORMPMessageAcceptedOrderByInput>>,
         offset: Option<i32>,
         limit: Option<i32>,
     ) -> GraphqlResult<Vec<ORMPMessageAccepted>> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
         query_ormp_message_accepteds(
             pool(ctx)?,
             where_.as_ref(),
@@ -82,11 +84,13 @@ impl QueryRoot {
     async fn ormp_message_accepteds_page(
         &self,
         ctx: &Context<'_>,
-        where_: Option<LegacyWhereInput>,
-        order_by: Option<Vec<LegacyOrderByInput>>,
+        where_: Option<ORMPMessageAcceptedWhereInput>,
+        order_by: Option<Vec<ORMPMessageAcceptedOrderByInput>>,
         offset: Option<i32>,
         limit: Option<i32>,
     ) -> GraphqlResult<ORMPMessageAcceptedPage> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
         query_ormp_message_accepteds_page(
             pool(ctx)?,
             where_.as_ref(),
@@ -152,11 +156,13 @@ impl QueryRoot {
     async fn ormp_message_dispatcheds(
         &self,
         ctx: &Context<'_>,
-        where_: Option<LegacyWhereInput>,
-        order_by: Option<Vec<LegacyOrderByInput>>,
+        where_: Option<ORMPMessageDispatchedWhereInput>,
+        order_by: Option<Vec<ORMPMessageDispatchedOrderByInput>>,
         offset: Option<i32>,
         limit: Option<i32>,
     ) -> GraphqlResult<Vec<ORMPMessageDispatched>> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
         query_ormp_message_dispatcheds(
             pool(ctx)?,
             where_.as_ref(),
@@ -170,11 +176,13 @@ impl QueryRoot {
     async fn ormp_message_dispatcheds_page(
         &self,
         ctx: &Context<'_>,
-        where_: Option<LegacyWhereInput>,
-        order_by: Option<Vec<LegacyOrderByInput>>,
+        where_: Option<ORMPMessageDispatchedWhereInput>,
+        order_by: Option<Vec<ORMPMessageDispatchedOrderByInput>>,
         offset: Option<i32>,
         limit: Option<i32>,
     ) -> GraphqlResult<ORMPMessageDispatchedPage> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
         query_ormp_message_dispatcheds_page(
             pool(ctx)?,
             where_.as_ref(),
@@ -240,11 +248,13 @@ impl QueryRoot {
     async fn msgport_message_sents(
         &self,
         ctx: &Context<'_>,
-        where_: Option<LegacyWhereInput>,
-        order_by: Option<Vec<LegacyOrderByInput>>,
+        where_: Option<MsgportMessageSentWhereInput>,
+        order_by: Option<Vec<MsgportMessageSentOrderByInput>>,
         offset: Option<i32>,
         limit: Option<i32>,
     ) -> GraphqlResult<Vec<MsgportMessageSent>> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
         query_msgport_message_sents(
             pool(ctx)?,
             where_.as_ref(),
@@ -258,11 +268,13 @@ impl QueryRoot {
     async fn msgport_message_sents_page(
         &self,
         ctx: &Context<'_>,
-        where_: Option<LegacyWhereInput>,
-        order_by: Option<Vec<LegacyOrderByInput>>,
+        where_: Option<MsgportMessageSentWhereInput>,
+        order_by: Option<Vec<MsgportMessageSentOrderByInput>>,
         offset: Option<i32>,
         limit: Option<i32>,
     ) -> GraphqlResult<MsgportMessageSentPage> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
         query_msgport_message_sents_page(
             pool(ctx)?,
             where_.as_ref(),
@@ -271,6 +283,46 @@ impl QueryRoot {
             limit,
         )
         .await
+    }
+
+    #[cfg(feature = "legacy-query-compat")]
+    async fn msgport_message_sents_connection(
+        &self,
+        ctx: &Context<'_>,
+        where_: Option<MsgportMessageSentWhereInput>,
+        order_by: Option<Vec<MsgportMessageSentOrderByInput>>,
+    ) -> GraphqlResult<LegacyTotalCountConnection> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
+        let page = query_msgport_message_sents_page(
+            pool(ctx)?,
+            where_.as_ref(),
+            order_by.as_deref(),
+            Some(0),
+            Some(0),
+        )
+        .await?;
+        Ok(LegacyTotalCountConnection::new(page.total_count))
+    }
+
+    #[cfg(feature = "legacy-query-compat")]
+    async fn ormp_message_dispatcheds_connection(
+        &self,
+        ctx: &Context<'_>,
+        where_: Option<ORMPMessageDispatchedWhereInput>,
+        order_by: Option<Vec<ORMPMessageDispatchedOrderByInput>>,
+    ) -> GraphqlResult<LegacyTotalCountConnection> {
+        let where_ = where_.map(LegacyWhereInput::from);
+        let order_by = order_by.map(legacy_order_by_vec);
+        let page = query_ormp_message_dispatcheds_page(
+            pool(ctx)?,
+            where_.as_ref(),
+            order_by.as_deref(),
+            Some(0),
+            Some(0),
+        )
+        .await?;
+        Ok(LegacyTotalCountConnection::new(page.total_count))
     }
 
     async fn signature_pub_signature_submittion_by_id(
@@ -320,4 +372,11 @@ impl QueryRoot {
 
 fn pool<'a>(ctx: &'a Context<'_>) -> GraphqlResult<&'a PgPool> {
     Ok(&ctx.data::<GraphqlState>()?.pool)
+}
+
+fn legacy_order_by_vec<T>(order_by: Vec<T>) -> Vec<LegacyOrderByInput>
+where
+    LegacyOrderByInput: From<T>,
+{
+    order_by.into_iter().map(LegacyOrderByInput::from).collect()
 }

@@ -327,11 +327,23 @@ fn push_where_group<'a>(
     text_cmp!(where_.from_eq, r#""from""#, " = ");
     text_cmp!(where_.to_eq, r#""to""#, " = ");
     text_cmp!(where_.from_dapp_eq, "from_dapp", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    text_in!(where_.from_dapp_in, "from_dapp", false);
     text_cmp!(where_.to_dapp_eq, "to_dapp", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    text_in!(where_.to_dapp_in, "to_dapp", false);
+    #[cfg(feature = "legacy-query-compat")]
+    text_cmp!(where_.transaction_from_eq, "transaction_from", " = ");
     bigint_cmp!(where_.from_chain_id_eq, "from_chain_id", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    bigint_in!(where_.from_chain_id_in, "from_chain_id");
     bigint_cmp!(where_.to_chain_id_eq, "to_chain_id", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    bigint_in!(where_.to_chain_id_in, "to_chain_id");
     bigint_cmp!(where_.src_chain_id_eq, "src_chain_id", " = ");
     bigint_cmp!(where_.target_chain_id_eq, "target_chain_id", " = ");
+    #[cfg(feature = "legacy-query-compat")]
+    bigint_in!(where_.target_chain_id_in, "target_chain_id");
     bigint_cmp!(where_.msg_index_eq, "msg_index", " = ");
     #[cfg(feature = "legacy-query-compat")]
     {
@@ -346,6 +358,7 @@ fn push_where_group<'a>(
         bigint_cmp!(where_.index_lte, r#""index""#, " <= ");
         bool_cmp!(where_.oracle_assigned_eq, "oracle_assigned", " = ");
         bool_cmp!(where_.relayer_assigned_eq, "relayer_assigned", " = ");
+        bool_cmp!(where_.dispatch_result_eq, "dispatch_result", " = ");
     }
 
     if let Some(groups) = where_.and.as_ref() {
