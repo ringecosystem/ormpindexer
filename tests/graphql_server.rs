@@ -28,8 +28,8 @@ async fn test_graphql_schema_exposes_pages_without_connections() {
         assert!(sdl.contains(page_type), "schema is missing {page_type}");
     }
     assert!(
-        !sdl.contains("Connection"),
-        "schema must not expose connection fields or types"
+        !sdl.contains("edges:") && !sdl.contains("nodes:"),
+        "schema must not expose cursor-style connection payloads"
     );
     assert!(sdl.contains("scalar BigInt"), "schema must expose BigInt");
     assert!(
@@ -47,6 +47,16 @@ async fn test_graphql_schema_exposes_pages_without_connections() {
     #[cfg(feature = "legacy-query-compat")]
     {
         for legacy_query_compat_name in [
+            "input MsgportMessageSentWhereInput",
+            "enum MsgportMessageSentOrderByInput",
+            "input ORMPMessageAcceptedWhereInput",
+            "enum ORMPMessageAcceptedOrderByInput",
+            "input ORMPMessageDispatchedWhereInput",
+            "enum ORMPMessageDispatchedOrderByInput",
+            "fromChainId_in",
+            "toChainId_in",
+            "fromDapp_in",
+            "transactionFrom_eq",
             "index_ASC",
             "msgIndex_DESC",
             "index_gt",

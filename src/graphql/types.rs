@@ -160,16 +160,37 @@ pub struct LegacyWhereInput {
     pub to_eq: Option<String>,
     #[graphql(name = "fromDapp_eq")]
     pub from_dapp_eq: Option<String>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "fromDapp_in")]
+    pub from_dapp_in: Option<Vec<String>>,
     #[graphql(name = "toDapp_eq")]
     pub to_dapp_eq: Option<String>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "toDapp_in")]
+    pub to_dapp_in: Option<Vec<String>>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "transactionFrom_eq")]
+    pub transaction_from_eq: Option<String>,
     #[graphql(name = "fromChainId_eq")]
     pub from_chain_id_eq: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "fromChainId_in")]
+    pub from_chain_id_in: Option<Vec<BigInt>>,
     #[graphql(name = "toChainId_eq")]
     pub to_chain_id_eq: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "toChainId_in")]
+    pub to_chain_id_in: Option<Vec<BigInt>>,
     #[graphql(name = "srcChainId_eq")]
     pub src_chain_id_eq: Option<BigInt>,
     #[graphql(name = "targetChainId_eq")]
     pub target_chain_id_eq: Option<BigInt>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "targetChainId_in")]
+    pub target_chain_id_in: Option<Vec<BigInt>>,
+    #[cfg(feature = "legacy-query-compat")]
+    #[graphql(name = "dispatchResult_eq")]
+    pub dispatch_result_eq: Option<bool>,
     #[graphql(name = "msgIndex_eq")]
     pub msg_index_eq: Option<BigInt>,
     #[cfg(feature = "legacy-query-compat")]
@@ -206,6 +227,33 @@ pub struct LegacyWhereInput {
     #[graphql(name = "relayerAssigned_eq")]
     pub relayer_assigned_eq: Option<bool>,
 }
+
+macro_rules! legacy_where_alias {
+    ($name:ident, $graphql_name:literal) => {
+        #[derive(Clone, Debug, Default, InputObject)]
+        #[graphql(name = $graphql_name)]
+        pub struct $name {
+            #[graphql(flatten)]
+            pub legacy: LegacyWhereInput,
+        }
+
+        impl From<$name> for LegacyWhereInput {
+            fn from(value: $name) -> Self {
+                value.legacy
+            }
+        }
+    };
+}
+
+legacy_where_alias!(MsgportMessageSentWhereInput, "MsgportMessageSentWhereInput");
+legacy_where_alias!(
+    ORMPMessageAcceptedWhereInput,
+    "ORMPMessageAcceptedWhereInput"
+);
+legacy_where_alias!(
+    ORMPMessageDispatchedWhereInput,
+    "ORMPMessageDispatchedWhereInput"
+);
 
 #[derive(Clone, Copy, Debug, Eq, Enum, PartialEq)]
 pub enum LegacyOrderByInput {
@@ -254,6 +302,103 @@ pub enum LegacyOrderByInput {
     #[graphql(name = "msgIndex_DESC")]
     MsgIndexDesc,
 }
+
+macro_rules! legacy_order_alias {
+    ($name:ident, $graphql_name:literal) => {
+        #[derive(Clone, Copy, Debug, Eq, Enum, PartialEq)]
+        #[graphql(name = $graphql_name)]
+        pub enum $name {
+            #[graphql(name = "id_ASC")]
+            IdAsc,
+            #[graphql(name = "id_DESC")]
+            IdDesc,
+            #[graphql(name = "blockNumber_ASC")]
+            BlockNumberAsc,
+            #[graphql(name = "blockNumber_DESC")]
+            BlockNumberDesc,
+            #[graphql(name = "blockTimestamp_ASC")]
+            BlockTimestampAsc,
+            #[graphql(name = "blockTimestamp_DESC")]
+            BlockTimestampDesc,
+            #[graphql(name = "chainId_ASC")]
+            ChainIdAsc,
+            #[graphql(name = "chainId_DESC")]
+            ChainIdDesc,
+            #[graphql(name = "logIndex_ASC")]
+            LogIndexAsc,
+            #[graphql(name = "logIndex_DESC")]
+            LogIndexDesc,
+            #[graphql(name = "transactionIndex_ASC")]
+            TransactionIndexAsc,
+            #[graphql(name = "transactionIndex_DESC")]
+            TransactionIndexDesc,
+            #[graphql(name = "msgHash_ASC")]
+            MsgHashAsc,
+            #[graphql(name = "msgHash_DESC")]
+            MsgHashDesc,
+            #[graphql(name = "msgId_ASC")]
+            MsgIdAsc,
+            #[graphql(name = "msgId_DESC")]
+            MsgIdDesc,
+            #[cfg(feature = "legacy-query-compat")]
+            #[graphql(name = "index_ASC")]
+            IndexAsc,
+            #[cfg(feature = "legacy-query-compat")]
+            #[graphql(name = "index_DESC")]
+            IndexDesc,
+            #[cfg(feature = "legacy-query-compat")]
+            #[graphql(name = "msgIndex_ASC")]
+            MsgIndexAsc,
+            #[cfg(feature = "legacy-query-compat")]
+            #[graphql(name = "msgIndex_DESC")]
+            MsgIndexDesc,
+        }
+
+        impl From<$name> for LegacyOrderByInput {
+            fn from(value: $name) -> Self {
+                match value {
+                    $name::IdAsc => Self::IdAsc,
+                    $name::IdDesc => Self::IdDesc,
+                    $name::BlockNumberAsc => Self::BlockNumberAsc,
+                    $name::BlockNumberDesc => Self::BlockNumberDesc,
+                    $name::BlockTimestampAsc => Self::BlockTimestampAsc,
+                    $name::BlockTimestampDesc => Self::BlockTimestampDesc,
+                    $name::ChainIdAsc => Self::ChainIdAsc,
+                    $name::ChainIdDesc => Self::ChainIdDesc,
+                    $name::LogIndexAsc => Self::LogIndexAsc,
+                    $name::LogIndexDesc => Self::LogIndexDesc,
+                    $name::TransactionIndexAsc => Self::TransactionIndexAsc,
+                    $name::TransactionIndexDesc => Self::TransactionIndexDesc,
+                    $name::MsgHashAsc => Self::MsgHashAsc,
+                    $name::MsgHashDesc => Self::MsgHashDesc,
+                    $name::MsgIdAsc => Self::MsgIdAsc,
+                    $name::MsgIdDesc => Self::MsgIdDesc,
+                    #[cfg(feature = "legacy-query-compat")]
+                    $name::IndexAsc => Self::IndexAsc,
+                    #[cfg(feature = "legacy-query-compat")]
+                    $name::IndexDesc => Self::IndexDesc,
+                    #[cfg(feature = "legacy-query-compat")]
+                    $name::MsgIndexAsc => Self::MsgIndexAsc,
+                    #[cfg(feature = "legacy-query-compat")]
+                    $name::MsgIndexDesc => Self::MsgIndexDesc,
+                }
+            }
+        }
+    };
+}
+
+legacy_order_alias!(
+    MsgportMessageSentOrderByInput,
+    "MsgportMessageSentOrderByInput"
+);
+legacy_order_alias!(
+    ORMPMessageAcceptedOrderByInput,
+    "ORMPMessageAcceptedOrderByInput"
+);
+legacy_order_alias!(
+    ORMPMessageDispatchedOrderByInput,
+    "ORMPMessageDispatchedOrderByInput"
+);
 
 #[derive(Clone, Debug, FromRow, SimpleObject)]
 #[graphql(name = "ORMPHashImported", rename_fields = "camelCase")]
@@ -442,3 +587,17 @@ page_type!(
     "SignaturePubSignatureSubmittionPage",
     SignaturePubSignatureSubmittion
 );
+
+#[cfg(feature = "legacy-query-compat")]
+#[derive(Clone, Debug, SimpleObject)]
+#[graphql(rename_fields = "camelCase")]
+pub struct LegacyTotalCountConnection {
+    pub(super) total_count: i64,
+}
+
+#[cfg(feature = "legacy-query-compat")]
+impl LegacyTotalCountConnection {
+    pub(super) fn new(total_count: i64) -> Self {
+        Self { total_count }
+    }
+}
