@@ -13,8 +13,8 @@ use crate::{
     config::{ChainConfig, RuntimeConfig},
     database::EventWriter,
     datalens::{
-        DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
-        DatalensTransactionQuery, classify_datalens_failure_message,
+        DatalensBlockQuery, DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult,
+        DatalensLogReader, DatalensTransactionQuery, classify_datalens_failure_message,
     },
     decoder::EventDecoder,
     planner::{MSGPORT_MESSAGE_SENT_TOPIC, TRON_CHAIN_ID, chain_dataset},
@@ -365,7 +365,9 @@ where
                 chain.chain_id, dataset, range.to_block
             )
         })?;
-        let anchors = block_anchors_from_logs(chain.chain_id, dataset, chain.finality_mode, &logs);
+        let anchors = self
+            .block_anchors_for_range(chain, dataset, range, &logs)
+            .await?;
         let written = self
             .writer
             .write_events_and_advance_checkpoint(
@@ -482,7 +484,12 @@ where
         let Some(to_block) = checkpoint_next_block.checked_sub(1) else {
             return Ok(None);
         };
-        let from_block = checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks);
+        let from_block = chain
+            .start_block
+            .max(checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks));
+        if from_block > to_block {
+            return Ok(None);
+        }
         let anchors = self
             .checkpoints
             .read_block_anchors(chain.chain_id, dataset, from_block, to_block)
@@ -493,47 +500,39 @@ where
                     chain.chain_id, dataset, from_block, to_block
                 )
             })?;
-        if anchors.is_empty() {
-            return Ok(None);
-        }
-
-        let current_from = anchors.first().expect("anchors not empty").block_number;
-        let current_to = anchors.last().expect("anchors not empty").block_number;
-        let current_logs = self
+        let stored_anchors = anchors
+            .into_iter()
+            .map(|anchor| (anchor.block_number, anchor))
+            .collect::<BTreeMap<_, _>>();
+        let current_blocks = self
             .reader
-            .query_logs(DatalensLogQuery {
+            .query_blocks(DatalensBlockQuery {
                 chain_id: chain.chain_id,
-                from_block: current_from,
-                to_block: current_to,
-                contracts: chain.contracts.clone(),
-                topics: chain.topics.clone(),
+                from_block,
+                to_block,
                 finality_mode: chain.finality_mode,
             })
             .await
             .with_context(|| {
                 format!(
-                    "query ORMP Datalens reorg anchors chain_id={} dataset={} from_block={} to_block={}",
-                    chain.chain_id, dataset, current_from, current_to
+                    "query ORMP Datalens reorg block anchors chain_id={} dataset={} from_block={} to_block={}",
+                    chain.chain_id, dataset, from_block, to_block
                 )
             })?;
-        let current_hashes = current_logs
-            .logs
-            .iter()
-            .filter_map(|log| {
-                log.block_hash
-                    .as_ref()
-                    .map(|block_hash| (log.block_number, block_hash))
-            })
+        let current_blocks = current_blocks
+            .blocks
+            .into_iter()
+            .map(|block| (block.block_number, block))
             .collect::<HashMap<_, _>>();
 
-        let rollback_block = anchors
-            .iter()
-            .find(|anchor| {
-                current_hashes
-                    .get(&anchor.block_number)
-                    .is_none_or(|block_hash| *block_hash != &anchor.block_hash)
-            })
-            .map(|anchor| anchor.block_number);
+        let rollback_block = (from_block..=to_block).find(|block_number| {
+            let Some(anchor) = stored_anchors.get(block_number) else {
+                return true;
+            };
+            current_blocks
+                .get(block_number)
+                .is_none_or(|block| block.block_hash != anchor.block_hash)
+        });
         let Some(rollback_block) = rollback_block else {
             return Ok(None);
         };
@@ -556,6 +555,47 @@ where
                 )
             })?;
         Ok(Some(rollback_block))
+    }
+
+    async fn block_anchors_for_range(
+        &self,
+        chain: &ChainConfig,
+        dataset: &str,
+        range: BlockRange,
+        logs: &[crate::datalens::DatalensLog],
+    ) -> anyhow::Result<Vec<BlockAnchor>> {
+        if !chain.finality_mode.uses_reorg_protection() {
+            return Ok(block_anchors_from_logs(
+                chain.chain_id,
+                dataset,
+                chain.finality_mode,
+                logs,
+            ));
+        }
+
+        let blocks = self
+            .reader
+            .query_blocks(DatalensBlockQuery {
+                chain_id: chain.chain_id,
+                from_block: range.from_block,
+                to_block: range.to_block,
+                finality_mode: chain.finality_mode,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "query ORMP Datalens block anchors chain_id={} dataset={} from_block={} to_block={}",
+                    chain.chain_id, dataset, range.from_block, range.to_block
+                )
+            })?;
+
+        block_anchors_from_blocks(
+            chain.chain_id,
+            dataset,
+            chain.finality_mode,
+            range,
+            blocks.blocks,
+        )
     }
 }
 
@@ -591,6 +631,39 @@ fn block_anchors_from_logs(
             });
     }
     anchors.into_values().collect()
+}
+
+fn block_anchors_from_blocks(
+    chain_id: u64,
+    dataset: &str,
+    finality: crate::config::FinalityMode,
+    range: BlockRange,
+    blocks: Vec<crate::datalens::DatalensBlock>,
+) -> anyhow::Result<Vec<BlockAnchor>> {
+    let blocks = blocks
+        .into_iter()
+        .map(|block| (block.block_number, block))
+        .collect::<BTreeMap<_, _>>();
+    let mut anchors = Vec::new();
+    for block_number in range.from_block..=range.to_block {
+        let Some(block) = blocks.get(&block_number) else {
+            anyhow::bail!(
+                "Datalens block query missing block header chain_id={} dataset={} block_number={}",
+                chain_id,
+                dataset,
+                block_number
+            );
+        };
+        anchors.push(BlockAnchor {
+            chain_id,
+            dataset: dataset.to_owned(),
+            block_number,
+            block_hash: block.block_hash.clone(),
+            parent_hash: block.parent_hash.clone(),
+            finality,
+        });
+    }
+    Ok(anchors)
 }
 
 fn can_split_datalens_query_failure(error: &anyhow::Error, range: BlockRange) -> bool {

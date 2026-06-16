@@ -1,10 +1,10 @@
 use ormpindexer::{
     config::FinalityMode,
     datalens::{
-        DatalensFailureKind, DatalensLog, chain_head_finality, classify_datalens_failure_message,
-        evm_chain_name, logs_from_native_query_payload, native_graphql_request,
-        native_graphql_transaction_request, transactions_from_native_query_payload,
-        tron_chain_name,
+        DatalensFailureKind, DatalensLog, blocks_from_native_query_payload, chain_head_finality,
+        classify_datalens_failure_message, evm_chain_name, logs_from_native_query_payload,
+        native_graphql_block_request, native_graphql_request, native_graphql_transaction_request,
+        transactions_from_native_query_payload, tron_chain_name,
     },
     planner::TRON_CHAIN_ID,
 };
@@ -158,6 +158,50 @@ fn test_evm_transaction_query_uses_transactions_dataset_and_decodes_senders() {
     assert_eq!(transactions[0].hash, "0xtx");
     assert_eq!(transactions[0].block_number, 123);
     assert_eq!(transactions[0].from, "0xsender");
+}
+
+#[test]
+fn test_block_query_uses_blocks_dataset_and_decodes_headers() {
+    let request = native_graphql_block_request(&ormpindexer::datalens::DatalensBlockQuery {
+        chain_id: 46,
+        from_block: 100,
+        to_block: 110,
+        finality_mode: ormpindexer::config::FinalityMode::Safe,
+    })
+    .expect("build block request");
+    let input = &request["variables"]["input"];
+
+    assert_eq!(
+        input["datasetKey"],
+        serde_json::json!({"family": "evm", "name": "blocks"})
+    );
+    assert_eq!(input["selector"], serde_json::json!({"kind": "all"}));
+    assert_eq!(input["finality"], "safe_to_latest");
+
+    let blocks = blocks_from_native_query_payload(
+        &serde_json::json!({
+            "data": {
+                "query": {
+                    "rows": {
+                        "dataset": "blocks",
+                        "rows": [{
+                            "number": 123,
+                            "hash": "0xblock",
+                            "parent_hash": "0xparent"
+                        }]
+                    }
+                }
+            }
+        }),
+        46,
+    )
+    .expect("decode block rows");
+
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].chain_id, 46);
+    assert_eq!(blocks[0].block_number, 123);
+    assert_eq!(blocks[0].block_hash, "0xblock");
+    assert_eq!(blocks[0].parent_hash.as_deref(), Some("0xparent"));
 }
 
 #[test]

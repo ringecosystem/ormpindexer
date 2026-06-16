@@ -11,17 +11,17 @@ use crate::{
     config::{DatalensConfig, FinalityMode},
     datalens::{
         query::{
-            chain_head_finality, chain_name, logs_from_native_query_payload,
-            native_graphql_request, native_graphql_transaction_request,
-            transactions_from_native_query_payload,
+            blocks_from_native_query_payload, chain_head_finality, chain_name,
+            logs_from_native_query_payload, native_graphql_block_request, native_graphql_request,
+            native_graphql_transaction_request, transactions_from_native_query_payload,
         },
         retry::{
             body_has_retryable_graphql_errors, datalens_retry_delay, graphql_retry_after,
             http_retry_after, is_retryable_http_status,
         },
         types::{
-            DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader, DatalensTransactionQuery,
-            DatalensTransactionQueryResult,
+            DatalensBlockQuery, DatalensBlockQueryResult, DatalensLogQuery, DatalensLogQueryResult,
+            DatalensLogReader, DatalensTransactionQuery, DatalensTransactionQueryResult,
         },
     },
     warmup::{
@@ -289,6 +289,38 @@ impl DatalensLogReader for DatalensHttpClient {
 
         let logs = logs_from_native_query_payload(&payload, query.chain_id)?;
         Ok(DatalensLogQueryResult { logs })
+    }
+
+    async fn query_blocks(
+        &self,
+        query: DatalensBlockQuery,
+    ) -> anyhow::Result<DatalensBlockQueryResult> {
+        let request = native_graphql_block_request(&query)?;
+        let endpoint = self.native_graphql_endpoint();
+        let body = self
+            .request_text_with_retries(
+                "Datalens block query",
+                || {
+                    let mut builder = self
+                        .http
+                        .post(&endpoint)
+                        .header("x-datalens-application", &self.config.application)
+                        .json(&request);
+                    if let Some(token) = &self.config.token {
+                        builder = builder.bearer_auth(token.expose_secret());
+                    }
+                    builder
+                },
+                body_has_retryable_graphql_errors,
+            )
+            .await?;
+        let payload: serde_json::Value = serde_json::from_str(&body)?;
+        if let Some(errors) = payload.get("errors") {
+            anyhow::bail!("Datalens block query returned errors: {errors}");
+        }
+
+        let blocks = blocks_from_native_query_payload(&payload, query.chain_id)?;
+        Ok(DatalensBlockQueryResult { blocks })
     }
 
     async fn query_transactions(

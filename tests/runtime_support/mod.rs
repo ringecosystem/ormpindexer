@@ -8,8 +8,9 @@ use ormpindexer::{
     config::FinalityMode,
     database::EventWriter,
     datalens::{
-        DatalensLog, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
-        DatalensTransaction, DatalensTransactionQuery, DatalensTransactionQueryResult,
+        DatalensBlock, DatalensBlockQuery, DatalensBlockQueryResult, DatalensLog, DatalensLogQuery,
+        DatalensLogQueryResult, DatalensLogReader, DatalensTransaction, DatalensTransactionQuery,
+        DatalensTransactionQueryResult,
     },
     decoder::EventDecoder,
     schema::{ChainLogMetadata, EventSource, LegacyOrmPEvent},
@@ -17,6 +18,7 @@ use ormpindexer::{
 
 #[derive(Clone)]
 pub struct RecordingDatalensReader {
+    blocks: Vec<DatalensBlock>,
     logs: Vec<DatalensLog>,
     transactions: Vec<DatalensTransaction>,
     heads: BTreeMap<u64, u64>,
@@ -24,12 +26,14 @@ pub struct RecordingDatalensReader {
     query_failures: BTreeMap<u64, String>,
     range_query_failures: BTreeMap<(u64, u64, u64), String>,
     pub queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
+    block_queries: Arc<Mutex<Vec<DatalensBlockQuery>>>,
     transaction_queries: Arc<Mutex<Vec<DatalensTransactionQuery>>>,
 }
 
 impl RecordingDatalensReader {
     pub fn new(logs: Vec<DatalensLog>) -> Self {
         Self {
+            blocks: Vec::new(),
             logs,
             transactions: Vec::new(),
             heads: BTreeMap::new(),
@@ -37,6 +41,7 @@ impl RecordingDatalensReader {
             query_failures: BTreeMap::new(),
             range_query_failures: BTreeMap::new(),
             queries: Arc::new(Mutex::new(Vec::new())),
+            block_queries: Arc::new(Mutex::new(Vec::new())),
             transaction_queries: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -49,6 +54,15 @@ impl RecordingDatalensReader {
     pub fn with_transactions(mut self, transactions: Vec<DatalensTransaction>) -> Self {
         self.transactions = transactions;
         self
+    }
+
+    pub fn with_blocks(mut self, blocks: Vec<DatalensBlock>) -> Self {
+        self.blocks = blocks;
+        self
+    }
+
+    pub fn block_queries(&self) -> Arc<Mutex<Vec<DatalensBlockQuery>>> {
+        self.block_queries.clone()
     }
 
     pub fn transaction_queries(&self) -> Arc<Mutex<Vec<DatalensTransactionQuery>>> {
@@ -112,6 +126,28 @@ impl DatalensLogReader for RecordingDatalensReader {
                     log.chain_id == query.chain_id
                         && log.block_number >= query.from_block
                         && log.block_number <= query.to_block
+                })
+                .cloned()
+                .collect(),
+        })
+    }
+
+    async fn query_blocks(
+        &self,
+        query: DatalensBlockQuery,
+    ) -> anyhow::Result<DatalensBlockQueryResult> {
+        self.block_queries
+            .lock()
+            .expect("block queries lock")
+            .push(query.clone());
+        Ok(DatalensBlockQueryResult {
+            blocks: self
+                .blocks
+                .iter()
+                .filter(|block| {
+                    block.chain_id == query.chain_id
+                        && block.block_number >= query.from_block
+                        && block.block_number <= query.to_block
                 })
                 .cloned()
                 .collect(),

@@ -3,6 +3,32 @@ use serde::{Deserialize, Serialize};
 use crate::config::FinalityMode;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatalensBlockQuery {
+    pub chain_id: u64,
+    pub from_block: u64,
+    pub to_block: u64,
+    pub finality_mode: FinalityMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatalensBlock {
+    #[serde(alias = "chain_id")]
+    pub chain_id: u64,
+    #[serde(alias = "block_number", alias = "number")]
+    pub block_number: u64,
+    #[serde(alias = "block_hash", alias = "hash")]
+    pub block_hash: String,
+    #[serde(default, alias = "parent_hash")]
+    pub parent_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatalensBlockQueryResult {
+    pub blocks: Vec<DatalensBlock>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensLogQuery {
     pub chain_id: u64,
     pub from_block: u64,
@@ -81,6 +107,13 @@ pub struct DatalensTransactionQueryResult {
 pub trait DatalensLogReader {
     async fn latest_block(&self, chain_id: u64, finality_mode: FinalityMode)
     -> anyhow::Result<u64>;
+
+    async fn query_blocks(
+        &self,
+        _query: DatalensBlockQuery,
+    ) -> anyhow::Result<DatalensBlockQueryResult> {
+        anyhow::bail!("Datalens block query is not implemented")
+    }
 
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult>;
 
