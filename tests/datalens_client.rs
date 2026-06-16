@@ -1,7 +1,9 @@
 use ormpindexer::{
+    config::FinalityMode,
     datalens::{
-        DatalensFailureKind, DatalensLog, classify_datalens_failure_message, evm_chain_name,
-        logs_from_native_query_payload, native_graphql_request, native_graphql_transaction_request,
+        DatalensFailureKind, DatalensLog, blocks_from_native_query_payload, chain_head_finality,
+        classify_datalens_failure_message, evm_chain_name, logs_from_native_query_payload,
+        native_graphql_block_request, native_graphql_request, native_graphql_transaction_request,
         transactions_from_native_query_payload, tron_chain_name,
     },
     planner::TRON_CHAIN_ID,
@@ -104,6 +106,7 @@ fn test_native_query_rows_decode_with_context_metadata() {
     assert_eq!(logs[0].chain_id, 46);
     assert_eq!(logs[0].block_number, 123);
     assert_eq!(logs[0].block_hash.as_deref(), Some("0xblock"));
+    assert_eq!(logs[0].parent_hash.as_deref(), Some("0xparent"));
     assert_eq!(logs[0].block_timestamp, Some(456));
     assert_eq!(logs[0].transaction_hash, "0xtx");
     assert_eq!(logs[0].transaction_index, Some(2));
@@ -158,6 +161,50 @@ fn test_evm_transaction_query_uses_transactions_dataset_and_decodes_senders() {
 }
 
 #[test]
+fn test_block_query_uses_blocks_dataset_and_decodes_headers() {
+    let request = native_graphql_block_request(&ormpindexer::datalens::DatalensBlockQuery {
+        chain_id: 46,
+        from_block: 100,
+        to_block: 110,
+        finality_mode: ormpindexer::config::FinalityMode::Safe,
+    })
+    .expect("build block request");
+    let input = &request["variables"]["input"];
+
+    assert_eq!(
+        input["datasetKey"],
+        serde_json::json!({"family": "evm", "name": "blocks"})
+    );
+    assert_eq!(input["selector"], serde_json::json!({"kind": "all"}));
+    assert_eq!(input["finality"], "safe_to_latest");
+
+    let blocks = blocks_from_native_query_payload(
+        &serde_json::json!({
+            "data": {
+                "query": {
+                    "rows": {
+                        "dataset": "blocks",
+                        "rows": [{
+                            "number": 123,
+                            "hash": "0xblock",
+                            "parent_hash": "0xparent"
+                        }]
+                    }
+                }
+            }
+        }),
+        46,
+    )
+    .expect("decode block rows");
+
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].chain_id, 46);
+    assert_eq!(blocks[0].block_number, 123);
+    assert_eq!(blocks[0].block_hash, "0xblock");
+    assert_eq!(blocks[0].parent_hash.as_deref(), Some("0xparent"));
+}
+
+#[test]
 fn test_tron_native_query_rows_decode_with_context_metadata() {
     let logs = logs_from_native_query_payload(
         &serde_json::json!({
@@ -204,6 +251,7 @@ fn test_tron_native_query_rows_decode_with_context_metadata() {
     assert_eq!(logs[0].chain_id, TRON_CHAIN_ID);
     assert_eq!(logs[0].block_number, 123);
     assert_eq!(logs[0].block_hash.as_deref(), Some("0xblock"));
+    assert_eq!(logs[0].parent_hash.as_deref(), Some("0xparent"));
     assert_eq!(logs[0].block_timestamp, Some(456));
     assert_eq!(logs[0].transaction_hash, "trontx");
     assert_eq!(logs[0].transaction_index, Some(2));
@@ -295,17 +343,32 @@ fn test_tron_native_graphql_request_uses_other_selector_shape() {
 
 #[test]
 fn test_evm_native_graphql_request_uses_datalens_finality_enum() {
-    let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
-        chain_id: 42161,
-        from_block: 466_386_813,
-        to_block: 466_386_813,
-        contracts: vec!["0x2cd1867fb8016f93710b6386f7f9f1d540a60812".to_owned()],
-        topics: Vec::new(),
-        finality_mode: ormpindexer::config::FinalityMode::Finalized,
-    })
-    .expect("build EVM request");
+    for (finality_mode, expected) in [
+        (FinalityMode::Finalized, "durable_only"),
+        (FinalityMode::Durable, "durable_only"),
+        (FinalityMode::Safe, "safe_to_latest"),
+        (FinalityMode::Latest, "latest_only"),
+    ] {
+        let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
+            chain_id: 42161,
+            from_block: 466_386_813,
+            to_block: 466_386_813,
+            contracts: vec!["0x2cd1867fb8016f93710b6386f7f9f1d540a60812".to_owned()],
+            topics: Vec::new(),
+            finality_mode,
+        })
+        .expect("build EVM request");
 
-    assert_eq!(request["variables"]["input"]["finality"], "durable_only");
+        assert_eq!(request["variables"]["input"]["finality"], expected);
+    }
+}
+
+#[test]
+fn test_chain_head_finality_maps_runtime_modes_to_datalens_head_finality() {
+    assert_eq!(chain_head_finality(FinalityMode::Finalized), "finalized");
+    assert_eq!(chain_head_finality(FinalityMode::Durable), "finalized");
+    assert_eq!(chain_head_finality(FinalityMode::Safe), "safe");
+    assert_eq!(chain_head_finality(FinalityMode::Latest), "latest");
 }
 
 #[test]

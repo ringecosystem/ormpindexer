@@ -86,6 +86,7 @@ fn test_decode_tron_raw_message_accepted_from_block_scan_fields() {
         block_hash: Some(
             "0x9c64f37100000000000000000000000000000000000000000000000000000000".to_owned(),
         ),
+        parent_hash: None,
         block_timestamp: Some(1_800_000_000_000),
         transaction_hash: "trontx".to_owned(),
         transaction_index: Some(4),
@@ -246,6 +247,7 @@ fn tron_log() -> DatalensLog {
         chain_id: TRON_CHAIN_ID,
         block_number: 123,
         block_hash: None,
+        parent_hash: None,
         block_timestamp: Some(456),
         transaction_hash: "trontx".to_owned(),
         transaction_index: Some(2),

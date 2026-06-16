@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     time::{Duration, Instant},
 };
 
@@ -9,12 +9,12 @@ use anyhow::Context;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
-    checkpoint::{BlockRange, CheckpointStore, plan_next_range},
+    checkpoint::{BlockAnchor, BlockRange, CheckpointStore, plan_next_range},
     config::{ChainConfig, RuntimeConfig},
     database::EventWriter,
     datalens::{
-        DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
-        DatalensTransactionQuery, classify_datalens_failure_message,
+        DatalensBlockQuery, DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult,
+        DatalensLogReader, DatalensTransactionQuery, classify_datalens_failure_message,
     },
     decoder::EventDecoder,
     planner::{MSGPORT_MESSAGE_SENT_TOPIC, TRON_CHAIN_ID, chain_dataset},
@@ -109,7 +109,7 @@ impl<R, C, D, W> IndexerRunner<R, C, D, W> {
 impl<R, C, D, W> IndexerRunner<R, C, D, W>
 where
     R: DatalensLogReader,
-    C: CheckpointStore,
+    C: CheckpointStore + Sync,
     D: EventDecoder,
     W: EventWriter,
 {
@@ -185,9 +185,16 @@ where
                     chain.chain_id, dataset, chain.start_block
                 )
             })?;
+        if chain.finality_mode.uses_reorg_protection()
+            && let Some(rollback_block) = self
+                .rollback_reorged_anchors(&chain, dataset, checkpoint.next_block)
+                .await?
+        {
+            checkpoint.next_block = rollback_block;
+        }
         let latest_block = self
             .reader
-            .latest_block(chain.chain_id, self.config.finality_mode)
+            .latest_block(chain.chain_id, chain.finality_mode)
             .await
             .with_context(|| format!("query Datalens chain head for chain {}", chain.chain_id))?;
         let target_block = latest_block.saturating_sub(self.config.datalens.head_buffer_blocks);
@@ -246,7 +253,7 @@ where
         let mut report = ProcessedRangeReport::default();
 
         while let Some(range) = pending.pop() {
-            log_query_start(chain, dataset, range, target_block, &self.config);
+            log_query_start(chain, dataset, range, target_block);
             let batch_started = Instant::now();
             let result = match self.query_range_once(chain, dataset, range).await {
                 Ok(result) => result,
@@ -308,7 +315,7 @@ where
                 to_block: range.to_block,
                 contracts: chain.contracts.clone(),
                 topics: chain.topics.clone(),
-                finality_mode: self.config.finality_mode,
+                finality_mode: chain.finality_mode,
             })
             .await
             .with_context(|| {
@@ -351,25 +358,30 @@ where
                 )
             })?);
         }
-        let written = self.writer.write_events(&events).await.with_context(|| {
-            format!(
-                "write ORMP events chain_id={} dataset={} from_block={} to_block={}",
-                chain.chain_id, dataset, range.from_block, range.to_block
-            )
-        })?;
         let next_block = range.to_block.checked_add(1).with_context(|| {
             format!(
                 "ORMP checkpoint next block overflow chain_id={} dataset={} to_block={}",
                 chain.chain_id, dataset, range.to_block
             )
         })?;
-        self.checkpoints
-            .advance(chain.chain_id, dataset, next_block)
+        let anchors = self
+            .block_anchors_for_range(chain, dataset, range, &logs)
+            .await?;
+        let written = self
+            .writer
+            .write_events_and_advance_checkpoint(
+                &self.checkpoints,
+                &events,
+                &anchors,
+                chain.chain_id,
+                dataset,
+                next_block,
+            )
             .await
             .with_context(|| {
                 format!(
-                    "advance ORMP checkpoint chain_id={} dataset={} next_block={}",
-                    chain.chain_id, dataset, next_block
+                    "write ORMP events chain_id={} dataset={} from_block={} to_block={} next_block={}",
+                    chain.chain_id, dataset, range.from_block, range.to_block, next_block
                 )
             })?;
 
@@ -434,7 +446,7 @@ where
                         chain_id: chain.chain_id,
                         from_block: block_number,
                         to_block: block_number,
-                        finality_mode: self.config.finality_mode,
+                        finality_mode: chain.finality_mode,
                     })
                     .await
                     .with_context(|| {
@@ -461,6 +473,129 @@ where
 
         Ok(logs)
     }
+
+    async fn rollback_reorged_anchors(
+        &self,
+        chain: &ChainConfig,
+        dataset: &str,
+        checkpoint_next_block: u64,
+    ) -> anyhow::Result<Option<u64>> {
+        let Some(to_block) = checkpoint_next_block.checked_sub(1) else {
+            return Ok(None);
+        };
+        let from_block = chain
+            .start_block
+            .max(checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks));
+        if from_block > to_block {
+            return Ok(None);
+        }
+        let anchors = self
+            .checkpoints
+            .read_block_anchors(chain.chain_id, dataset, from_block, to_block)
+            .await
+            .with_context(|| {
+                format!(
+                    "read ORMP block anchors chain_id={} dataset={} from_block={} to_block={}",
+                    chain.chain_id, dataset, from_block, to_block
+                )
+            })?;
+        let stored_anchors = anchors
+            .into_iter()
+            .map(|anchor| (anchor.block_number, anchor))
+            .collect::<BTreeMap<_, _>>();
+        let current_blocks = self
+            .reader
+            .query_blocks(DatalensBlockQuery {
+                chain_id: chain.chain_id,
+                from_block,
+                to_block,
+                finality_mode: chain.finality_mode,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "query ORMP Datalens reorg block anchors chain_id={} dataset={} from_block={} to_block={}",
+                    chain.chain_id, dataset, from_block, to_block
+                )
+            })?;
+        let current_blocks = current_blocks
+            .blocks
+            .into_iter()
+            .map(|block| (block.block_number, block))
+            .collect::<HashMap<_, _>>();
+
+        let rollback_block = (from_block..=to_block).find(|block_number| {
+            let Some(anchor) = stored_anchors.get(block_number) else {
+                return true;
+            };
+            current_blocks
+                .get(block_number)
+                .is_none_or(|block| block.block_hash != anchor.block_hash)
+        });
+        let Some(rollback_block) = rollback_block else {
+            return Ok(None);
+        };
+
+        log::warn!(
+            "rolling back ORMP reorged range chain_id={} dataset={} rollback_block={} checkpoint_next_block={} finality={}",
+            chain.chain_id,
+            dataset,
+            rollback_block,
+            checkpoint_next_block,
+            chain.finality_mode.as_str(),
+        );
+        self.checkpoints
+            .rollback_legacy_from(chain.chain_id, dataset, rollback_block)
+            .await
+            .with_context(|| {
+                format!(
+                    "rollback ORMP legacy rows chain_id={} dataset={} rollback_block={}",
+                    chain.chain_id, dataset, rollback_block
+                )
+            })?;
+        Ok(Some(rollback_block))
+    }
+
+    async fn block_anchors_for_range(
+        &self,
+        chain: &ChainConfig,
+        dataset: &str,
+        range: BlockRange,
+        logs: &[crate::datalens::DatalensLog],
+    ) -> anyhow::Result<Vec<BlockAnchor>> {
+        if !chain.finality_mode.uses_reorg_protection() {
+            return Ok(block_anchors_from_logs(
+                chain.chain_id,
+                dataset,
+                chain.finality_mode,
+                logs,
+            ));
+        }
+
+        let blocks = self
+            .reader
+            .query_blocks(DatalensBlockQuery {
+                chain_id: chain.chain_id,
+                from_block: range.from_block,
+                to_block: range.to_block,
+                finality_mode: chain.finality_mode,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "query ORMP Datalens block anchors chain_id={} dataset={} from_block={} to_block={}",
+                    chain.chain_id, dataset, range.from_block, range.to_block
+                )
+            })?;
+
+        block_anchors_from_blocks(
+            chain.chain_id,
+            dataset,
+            chain.finality_mode,
+            range,
+            blocks.blocks,
+        )
+    }
 }
 
 fn sender_hash_key(hash: &str) -> String {
@@ -470,6 +605,64 @@ fn sender_hash_key(hash: &str) -> String {
         .or_else(|| hash.strip_prefix("0X"))
         .unwrap_or(hash);
     format!("0x{}", hash.to_ascii_lowercase())
+}
+
+fn block_anchors_from_logs(
+    chain_id: u64,
+    dataset: &str,
+    finality: crate::config::FinalityMode,
+    logs: &[crate::datalens::DatalensLog],
+) -> Vec<BlockAnchor> {
+    let mut anchors = BTreeMap::new();
+    for log in logs {
+        let Some(block_hash) = log.block_hash.as_ref() else {
+            continue;
+        };
+        anchors
+            .entry(log.block_number)
+            .or_insert_with(|| BlockAnchor {
+                chain_id,
+                dataset: dataset.to_owned(),
+                block_number: log.block_number,
+                block_hash: block_hash.clone(),
+                parent_hash: log.parent_hash.clone(),
+                finality,
+            });
+    }
+    anchors.into_values().collect()
+}
+
+fn block_anchors_from_blocks(
+    chain_id: u64,
+    dataset: &str,
+    finality: crate::config::FinalityMode,
+    range: BlockRange,
+    blocks: Vec<crate::datalens::DatalensBlock>,
+) -> anyhow::Result<Vec<BlockAnchor>> {
+    let blocks = blocks
+        .into_iter()
+        .map(|block| (block.block_number, block))
+        .collect::<BTreeMap<_, _>>();
+    let mut anchors = Vec::new();
+    for block_number in range.from_block..=range.to_block {
+        let Some(block) = blocks.get(&block_number) else {
+            anyhow::bail!(
+                "Datalens block query missing block header chain_id={} dataset={} block_number={}",
+                chain_id,
+                dataset,
+                block_number
+            );
+        };
+        anchors.push(BlockAnchor {
+            chain_id,
+            dataset: dataset.to_owned(),
+            block_number,
+            block_hash: block.block_hash.clone(),
+            parent_hash: block.parent_hash.clone(),
+            finality,
+        });
+    }
+    Ok(anchors)
 }
 
 fn can_split_datalens_query_failure(error: &anyhow::Error, range: BlockRange) -> bool {
@@ -501,13 +694,7 @@ fn split_range(range: BlockRange) -> (BlockRange, BlockRange) {
     )
 }
 
-fn log_query_start(
-    chain: &ChainConfig,
-    dataset: &str,
-    range: BlockRange,
-    target_block: u64,
-    config: &RuntimeConfig,
-) {
+fn log_query_start(chain: &ChainConfig, dataset: &str, range: BlockRange, target_block: u64) {
     log::info!(
         "querying ORMP Datalens logs chain_id={} dataset={} from_block={} to_block={} target_block={} batch_size={} contracts={} topics={} finality={}",
         chain.chain_id,
@@ -518,7 +705,7 @@ fn log_query_start(
         chain.batch_size,
         chain.contracts.len(),
         chain.topics.len(),
-        config.finality_mode.as_str(),
+        chain.finality_mode.as_str(),
     );
 }
 

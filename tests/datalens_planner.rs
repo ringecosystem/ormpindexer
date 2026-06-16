@@ -149,7 +149,7 @@ fn test_runtime_config_accepts_tron_chain_defaults() {
 }
 
 #[test]
-fn test_runtime_config_rejects_safe_finality_for_persistent_indexing() {
+fn test_runtime_config_accepts_safe_finality_with_reorg_window() {
     let env = BTreeMap::from([
         (
             "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
@@ -163,13 +163,14 @@ fn test_runtime_config_rejects_safe_finality_for_persistent_indexing() {
         ("ORMPINDEXER_FINALITY_MODE".to_owned(), "safe".to_owned()),
     ]);
 
-    let error = RuntimeConfig::from_env_map(&env).expect_err("safe mode is rejected");
+    let config = RuntimeConfig::from_env_map(&env).expect("safe mode is accepted");
 
-    assert!(
-        error
-            .to_string()
-            .contains("ORMPINDEXER_FINALITY_MODE must be finalized or durable")
+    assert_eq!(config.finality_mode, FinalityMode::Safe);
+    assert_eq!(
+        config.chain(46).expect("chain 46").finality_mode,
+        FinalityMode::Safe
     );
+    assert_eq!(config.reorg_window_blocks, 128);
 }
 
 #[test]

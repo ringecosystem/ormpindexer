@@ -103,6 +103,7 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
     assert_eq!(config.batch_size, 250);
     assert_eq!(config.start_block, 1000);
     assert_eq!(config.finality_mode, FinalityMode::Durable);
+    assert_eq!(config.reorg_window_blocks, 128);
     assert!(config.warmup.enabled);
     assert!(!config.warmup.ensure_on_startup);
     assert!(config.warmup.required);
@@ -119,6 +120,105 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
     assert_eq!(config.chain(46).expect("chain 46").start_block, 2000);
     assert_eq!(config.chain(1).expect("chain 1").batch_size, 250);
     assert_eq!(config.chain(46).expect("chain 46").batch_size, 50);
+    assert_eq!(
+        config.chain(1).expect("chain 1").finality_mode,
+        FinalityMode::Durable
+    );
+    assert_eq!(
+        config.chain(46).expect("chain 46").finality_mode,
+        FinalityMode::Durable
+    );
+}
+
+#[test]
+fn test_runtime_config_accepts_safe_and_latest_finality_modes() {
+    for (value, expected) in [
+        ("safe", FinalityMode::Safe),
+        ("latest", FinalityMode::Latest),
+    ] {
+        let env = BTreeMap::from([
+            (
+                "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+                "https://datalens.example".to_owned(),
+            ),
+            (
+                "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+                "ormp-production".to_owned(),
+            ),
+            ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+            ("ORMPINDEXER_FINALITY_MODE".to_owned(), value.to_owned()),
+        ]);
+
+        let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+
+        assert_eq!(config.finality_mode, expected);
+        assert_eq!(config.chain(46).expect("chain 46").finality_mode, expected);
+    }
+}
+
+#[test]
+fn test_runtime_config_chain_finality_override_takes_precedence() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "1,46".to_owned()),
+        (
+            "ORMPINDEXER_FINALITY_MODE".to_owned(),
+            "finalized".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_CHAIN_46_FINALITY_MODE".to_owned(),
+            "latest".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_REORG_WINDOW_BLOCKS".to_owned(),
+            "256".to_owned(),
+        ),
+    ]);
+
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+
+    assert_eq!(config.finality_mode, FinalityMode::Finalized);
+    assert_eq!(
+        config.chain(1).expect("chain 1").finality_mode,
+        FinalityMode::Finalized
+    );
+    assert_eq!(
+        config.chain(46).expect("chain 46").finality_mode,
+        FinalityMode::Latest
+    );
+    assert_eq!(config.reorg_window_blocks, 256);
+}
+
+#[test]
+fn test_runtime_config_rejects_zero_reorg_window_for_reorg_finality() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_FINALITY_MODE".to_owned(), "safe".to_owned()),
+        ("ORMPINDEXER_REORG_WINDOW_BLOCKS".to_owned(), "0".to_owned()),
+    ]);
+
+    let error = RuntimeConfig::from_env_map(&env).expect_err("zero reorg window is invalid");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ORMPINDEXER_REORG_WINDOW_BLOCKS must be greater than zero")
+    );
 }
 
 #[test]

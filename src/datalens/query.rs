@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     config::FinalityMode,
     datalens::types::{
-        DatalensLog, DatalensLogQuery, DatalensTransaction, DatalensTransactionQuery,
+        DatalensBlock, DatalensBlockQuery, DatalensLog, DatalensLogQuery, DatalensTransaction,
+        DatalensTransactionQuery,
     },
     planner::TRON_CHAIN_ID,
 };
@@ -21,6 +22,25 @@ pub fn native_graphql_request(query: &DatalensLogQuery) -> anyhow::Result<serde_
     Ok(json!({
         "query": r#"
             query OrmpIndexerLogs($input: QueryInput!) {
+              query(input: $input) {
+                rows
+              }
+            }
+        "#,
+        "variables": {
+            "input": input
+        }
+    }))
+}
+
+pub fn native_graphql_block_request(
+    query: &DatalensBlockQuery,
+) -> anyhow::Result<serde_json::Value> {
+    let input = block_query_input(query)?;
+
+    Ok(json!({
+        "query": r#"
+            query OrmpIndexerBlocks($input: QueryInput!) {
               query(input: $input) {
                 rows
               }
@@ -49,6 +69,21 @@ pub fn native_graphql_transaction_request(
             "input": input
         }
     }))
+}
+
+pub fn blocks_from_native_query_payload(
+    payload: &serde_json::Value,
+    chain_id: u64,
+) -> anyhow::Result<Vec<DatalensBlock>> {
+    let rows = payload
+        .pointer("/data/query/rows")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let blocks = native_block_rows(&rows)?;
+    blocks
+        .into_iter()
+        .map(|row| row.into_datalens_block(chain_id))
+        .collect()
 }
 
 pub fn logs_from_native_query_payload(
@@ -99,6 +134,32 @@ fn native_transaction_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<Datal
     Ok(serde_json::from_value(rows.clone())?)
 }
 
+fn native_block_rows(rows: &serde_json::Value) -> anyhow::Result<Vec<NativeBlockRow>> {
+    let rows = native_rows(rows).context("Datalens native query response missing block rows")?;
+    Ok(serde_json::from_value(rows.clone())?)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+struct NativeBlockRow {
+    #[serde(alias = "blockNumber", alias = "number")]
+    block_number: u64,
+    #[serde(alias = "blockHash", alias = "hash")]
+    block_hash: String,
+    #[serde(default, alias = "parentHash")]
+    parent_hash: Option<String>,
+}
+
+impl NativeBlockRow {
+    fn into_datalens_block(self, chain_id: u64) -> anyhow::Result<DatalensBlock> {
+        Ok(DatalensBlock {
+            chain_id,
+            block_number: self.block_number,
+            block_hash: self.block_hash,
+            parent_hash: self.parent_hash,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 struct NativeLogRow {
     #[serde(default)]
@@ -106,6 +167,8 @@ struct NativeLogRow {
     block_number: u64,
     #[serde(default)]
     block_hash: Option<String>,
+    #[serde(default)]
+    parent_hash: Option<String>,
     #[serde(default)]
     block_timestamp: Option<u64>,
     transaction_hash: String,
@@ -132,6 +195,7 @@ impl NativeLogRow {
             chain_id,
             block_number: self.block_number,
             block_hash: self.block_hash,
+            parent_hash: self.parent_hash,
             block_timestamp: self.block_timestamp,
             transaction_hash: self.transaction_hash,
             transaction_index: Some(self.transaction_index),
@@ -165,6 +229,8 @@ struct NativeTronEventRow {
     block_number: u64,
     #[serde(default)]
     block_hash: Option<String>,
+    #[serde(default)]
+    parent_hash: Option<String>,
     block_timestamp: u64,
     transaction_index: i32,
     event_index: u64,
@@ -199,6 +265,7 @@ impl NativeTronEventRow {
             chain_id,
             block_number: self.block_number,
             block_hash: self.block_hash,
+            parent_hash: self.parent_hash,
             block_timestamp: Some(self.block_timestamp),
             transaction_hash: self.transaction_id,
             transaction_index: Some(self.transaction_index),
@@ -271,6 +338,46 @@ fn evm_transaction_query_input(
         "datasetKey": {
             "family": "evm",
             "name": "transactions",
+        },
+        "selector": {
+            "kind": "all",
+        },
+        "range": {
+            "kind": "block",
+            "start": query.from_block,
+            "end": query.to_block,
+        },
+        "finality": native_finality(query.finality_mode),
+        "fields": {},
+    }))
+}
+
+fn block_query_input(query: &DatalensBlockQuery) -> anyhow::Result<serde_json::Value> {
+    let (family, chain) = if query.chain_id == TRON_CHAIN_ID {
+        (
+            "tron",
+            json!({
+                "family": { "kind": "other", "other": "tron" },
+                "configuredName": tron_chain_name(query.chain_id)?,
+                "networkId": { "numeric": query.chain_id },
+            }),
+        )
+    } else {
+        (
+            "evm",
+            json!({
+                "family": { "kind": "evm" },
+                "configuredName": evm_chain_name(query.chain_id)?,
+                "networkId": { "numeric": query.chain_id },
+            }),
+        )
+    };
+
+    Ok(json!({
+        "chain": chain,
+        "datasetKey": {
+            "family": family,
+            "name": "blocks",
         },
         "selector": {
             "kind": "all",
@@ -400,13 +507,17 @@ fn native_finality(finality_mode: FinalityMode) -> &'static str {
     match finality_mode {
         FinalityMode::Finalized => "durable_only",
         FinalityMode::Durable => "durable_only",
+        FinalityMode::Safe => "safe_to_latest",
+        FinalityMode::Latest => "latest_only",
     }
 }
 
-pub(super) fn chain_head_finality(finality_mode: FinalityMode) -> &'static str {
+pub fn chain_head_finality(finality_mode: FinalityMode) -> &'static str {
     match finality_mode {
         FinalityMode::Finalized => "finalized",
         FinalityMode::Durable => "finalized",
+        FinalityMode::Safe => "safe",
+        FinalityMode::Latest => "latest",
     }
 }
 

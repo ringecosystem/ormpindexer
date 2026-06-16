@@ -4,10 +4,10 @@ use std::{
 };
 
 use ormpindexer::{
-    checkpoint::{CheckpointStore, InMemoryCheckpointStore},
+    checkpoint::{BlockAnchor, CheckpointStore, InMemoryCheckpointStore},
     config::{FinalityMode, RuntimeConfig},
     database::DryRunEventWriter,
-    datalens::{DatalensLog, DatalensTransaction, DatalensTransactionQuery},
+    datalens::{DatalensBlock, DatalensLog, DatalensTransaction, DatalensTransactionQuery},
     decoder::NoopDecoder,
     planner::MSGPORT_MESSAGE_SENT_TOPIC,
     runner::{IndexerRunner, RunnerReport},
@@ -48,6 +48,7 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
         chain_id: 46,
         block_number: 12,
         block_hash: None,
+        parent_hash: None,
         block_timestamp: Some(1_700_000_000_000),
         transaction_hash: "0xtx".to_owned(),
         transaction_index: Some(0),
@@ -108,6 +109,7 @@ async fn test_runner_enriches_evm_logs_with_transaction_senders() {
         chain_id: 46,
         block_number: 12,
         block_hash: None,
+        parent_hash: None,
         block_timestamp: Some(1_700_000_000_000),
         transaction_hash: tx_hash.trim_start_matches("0x").to_ascii_uppercase(),
         transaction_index: Some(0),
@@ -159,6 +161,307 @@ async fn test_runner_enriches_evm_logs_with_transaction_senders() {
             finality_mode: FinalityMode::Finalized,
         }]
     );
+}
+
+#[tokio::test]
+async fn test_runner_rolls_back_first_mismatched_anchor_before_processing_safe_range() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "20".to_owned()),
+        ("ORMPINDEXER_FINALITY_MODE".to_owned(), "safe".to_owned()),
+        (
+            "ORMPINDEXER_REORG_WINDOW_BLOCKS".to_owned(),
+            "10".to_owned(),
+        ),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    checkpoints
+        .read_or_create(46, "evm.logs", 20)
+        .await
+        .expect("seed checkpoint");
+    checkpoints
+        .advance(46, "evm.logs", 24)
+        .await
+        .expect("advance checkpoint");
+    checkpoints
+        .upsert_block_anchors(&[
+            BlockAnchor {
+                chain_id: 46,
+                dataset: "evm.logs".to_owned(),
+                block_number: 20,
+                block_hash: "0xold-20".to_owned(),
+                parent_hash: Some("0xparent-19".to_owned()),
+                finality: FinalityMode::Safe,
+            },
+            BlockAnchor {
+                chain_id: 46,
+                dataset: "evm.logs".to_owned(),
+                block_number: 21,
+                block_hash: "0xhash-21".to_owned(),
+                parent_hash: Some("0xnew-20".to_owned()),
+                finality: FinalityMode::Safe,
+            },
+        ])
+        .await
+        .expect("seed anchors");
+    let reader = RecordingDatalensReader::new(vec![
+        DatalensLog {
+            id: Some("46-20-0".to_owned()),
+            chain_id: 46,
+            block_number: 20,
+            block_hash: Some("0xnew-20".to_owned()),
+            parent_hash: Some("0xparent-19".to_owned()),
+            block_timestamp: Some(1_700_000_000_000),
+            transaction_hash: "0xtx20".to_owned(),
+            transaction_index: Some(0),
+            log_index: 1,
+            address: "0x333".to_owned(),
+            transaction_from: None,
+            topics: vec!["0xaaa".to_owned()],
+            data: "0x".to_owned(),
+            event_name: None,
+            event_signature: None,
+            indexed_fields: Vec::new(),
+            non_indexed_fields: None,
+        },
+        DatalensLog {
+            id: Some("46-21-0".to_owned()),
+            chain_id: 46,
+            block_number: 21,
+            block_hash: Some("0xhash-21".to_owned()),
+            parent_hash: Some("0xnew-20".to_owned()),
+            block_timestamp: Some(1_700_000_000_000),
+            transaction_hash: "0xtx21".to_owned(),
+            transaction_index: Some(0),
+            log_index: 1,
+            address: "0x333".to_owned(),
+            transaction_from: None,
+            topics: vec!["0xaaa".to_owned()],
+            data: "0x".to_owned(),
+            event_name: None,
+            event_signature: None,
+            indexed_fields: Vec::new(),
+            non_indexed_fields: None,
+        },
+    ])
+    .with_blocks(vec![
+        datalens_block(20, "0xnew-20", "0xparent-19"),
+        datalens_block(21, "0xhash-21", "0xnew-20"),
+        datalens_block(22, "0xhash-22", "0xhash-21"),
+        datalens_block(23, "0xhash-23", "0xhash-22"),
+    ])
+    .with_head(46, 24);
+    let block_queries = reader.block_queries();
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("safe pass succeeds");
+
+    assert_eq!(report.ranges_queried, 1);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 24);
+    {
+        let queries = reader.queries.lock().expect("queries lock");
+        assert_eq!(
+            queries
+                .iter()
+                .map(|query| (query.from_block, query.to_block, query.finality_mode))
+                .collect::<Vec<_>>(),
+            vec![(20, 23, FinalityMode::Safe)]
+        );
+    }
+    assert_eq!(
+        block_queries
+            .lock()
+            .expect("block queries lock")
+            .iter()
+            .map(|query| (query.from_block, query.to_block, query.finality_mode))
+            .collect::<Vec<_>>(),
+        vec![(20, 23, FinalityMode::Safe), (20, 23, FinalityMode::Safe)]
+    );
+    let anchors = checkpoints
+        .read_block_anchors(46, "evm.logs", 20, 21)
+        .await
+        .expect("read anchors");
+    assert_eq!(anchors[0].block_hash, "0xnew-20");
+}
+
+#[tokio::test]
+async fn test_runner_rolls_back_empty_block_that_later_gains_event_after_reorg() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "10".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "20".to_owned()),
+        ("ORMPINDEXER_FINALITY_MODE".to_owned(), "safe".to_owned()),
+        ("ORMPINDEXER_REORG_WINDOW_BLOCKS".to_owned(), "5".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let checkpoints = InMemoryCheckpointStore::default();
+    checkpoints
+        .read_or_create(46, "evm.logs", 20)
+        .await
+        .expect("seed checkpoint");
+    checkpoints
+        .advance(46, "evm.logs", 25)
+        .await
+        .expect("advance checkpoint");
+    checkpoints
+        .upsert_block_anchors(&[
+            block_anchor(20, "0xhash-20", "0xparent-19", FinalityMode::Safe),
+            block_anchor(21, "0xhash-21", "0xhash-20", FinalityMode::Safe),
+            block_anchor(23, "0xold-23", "0xold-22", FinalityMode::Safe),
+            block_anchor(24, "0xold-24", "0xold-23", FinalityMode::Safe),
+        ])
+        .await
+        .expect("seed anchors");
+    let reader = RecordingDatalensReader::new(vec![
+        datalens_log(20, "0xhash-20", "0xparent-19"),
+        datalens_log(21, "0xhash-21", "0xhash-20"),
+        datalens_log(22, "0xnew-22", "0xhash-21"),
+        datalens_log(23, "0xnew-23", "0xnew-22"),
+        datalens_log(24, "0xnew-24", "0xnew-23"),
+    ])
+    .with_blocks(vec![
+        datalens_block(20, "0xhash-20", "0xparent-19"),
+        datalens_block(21, "0xhash-21", "0xhash-20"),
+        datalens_block(22, "0xnew-22", "0xhash-21"),
+        datalens_block(23, "0xnew-23", "0xnew-22"),
+        datalens_block(24, "0xnew-24", "0xnew-23"),
+    ])
+    .with_head(46, 25);
+    let block_queries = reader.block_queries();
+    let runner = IndexerRunner::new(
+        config,
+        reader.clone(),
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("safe pass succeeds");
+
+    assert_eq!(report.ranges_queried, 1);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
+    {
+        let queries = reader.queries.lock().expect("queries lock");
+        assert_eq!(
+            queries
+                .iter()
+                .map(|query| (query.from_block, query.to_block, query.finality_mode))
+                .collect::<Vec<_>>(),
+            vec![(22, 24, FinalityMode::Safe)]
+        );
+    }
+    assert_eq!(
+        block_queries
+            .lock()
+            .expect("block queries lock")
+            .iter()
+            .map(|query| (query.from_block, query.to_block, query.finality_mode))
+            .collect::<Vec<_>>(),
+        vec![(20, 24, FinalityMode::Safe), (22, 24, FinalityMode::Safe)]
+    );
+    let anchors = checkpoints
+        .read_block_anchors(46, "evm.logs", 20, 24)
+        .await
+        .expect("read anchors");
+    assert_eq!(
+        anchors
+            .iter()
+            .map(|anchor| (anchor.block_number, anchor.block_hash.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (20, "0xhash-20"),
+            (21, "0xhash-21"),
+            (22, "0xnew-22"),
+            (23, "0xnew-23"),
+            (24, "0xnew-24"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_runner_writes_anchors_for_empty_blocks_in_reorg_finality_modes() {
+    for finality_mode in [FinalityMode::Safe, FinalityMode::Latest] {
+        let finality = finality_mode.as_str().to_owned();
+        let env = BTreeMap::from([
+            (
+                "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+                "https://datalens.example".to_owned(),
+            ),
+            (
+                "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+                "ormp-production".to_owned(),
+            ),
+            ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+            ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+            ("ORMPINDEXER_START_BLOCK".to_owned(), "20".to_owned()),
+            ("ORMPINDEXER_FINALITY_MODE".to_owned(), finality),
+            ("ORMPINDEXER_REORG_WINDOW_BLOCKS".to_owned(), "5".to_owned()),
+        ]);
+        let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+        let checkpoints = InMemoryCheckpointStore::default();
+        let reader = RecordingDatalensReader::new(vec![datalens_log(22, "0xhash-22", "0xhash-21")])
+            .with_blocks(vec![
+                datalens_block(20, "0xhash-20", "0xparent-19"),
+                datalens_block(21, "0xhash-21", "0xhash-20"),
+                datalens_block(22, "0xhash-22", "0xhash-21"),
+                datalens_block(23, "0xhash-23", "0xhash-22"),
+                datalens_block(24, "0xhash-24", "0xhash-23"),
+            ])
+            .with_head(46, 25);
+        let runner = IndexerRunner::new(
+            config,
+            reader,
+            checkpoints.clone(),
+            NoopDecoder,
+            DryRunEventWriter,
+        );
+
+        let report = runner.run_once().await.expect("batch pass succeeds");
+
+        assert_eq!(report.checkpoints_advanced, 1);
+        assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
+        let anchors = checkpoints
+            .read_block_anchors(46, "evm.logs", 20, 24)
+            .await
+            .expect("read anchors");
+        assert_eq!(
+            anchors
+                .iter()
+                .map(|anchor| (anchor.block_number, anchor.finality))
+                .collect::<Vec<_>>(),
+            vec![
+                (20, finality_mode),
+                (21, finality_mode),
+                (22, finality_mode),
+                (23, finality_mode),
+                (24, finality_mode),
+            ]
+        );
+    }
 }
 
 #[tokio::test]
@@ -766,4 +1069,51 @@ async fn test_runner_loop_recovers_chain_errors_without_blocking_other_chains() 
 
     assert_eq!(checkpoints.next_block(1, "evm.logs").await.unwrap(), 10);
     run.abort();
+}
+
+fn block_anchor(
+    block_number: u64,
+    block_hash: &str,
+    parent_hash: &str,
+    finality: FinalityMode,
+) -> BlockAnchor {
+    BlockAnchor {
+        chain_id: 46,
+        dataset: "evm.logs".to_owned(),
+        block_number,
+        block_hash: block_hash.to_owned(),
+        parent_hash: Some(parent_hash.to_owned()),
+        finality,
+    }
+}
+
+fn datalens_log(block_number: u64, block_hash: &str, parent_hash: &str) -> DatalensLog {
+    DatalensLog {
+        id: Some(format!("46-{block_number}-0")),
+        chain_id: 46,
+        block_number,
+        block_hash: Some(block_hash.to_owned()),
+        parent_hash: Some(parent_hash.to_owned()),
+        block_timestamp: Some(1_700_000_000_000),
+        transaction_hash: format!("0xtx{block_number}"),
+        transaction_index: Some(0),
+        log_index: 1,
+        address: "0x333".to_owned(),
+        transaction_from: None,
+        topics: vec!["0xaaa".to_owned()],
+        data: "0x".to_owned(),
+        event_name: None,
+        event_signature: None,
+        indexed_fields: Vec::new(),
+        non_indexed_fields: None,
+    }
+}
+
+fn datalens_block(block_number: u64, block_hash: &str, parent_hash: &str) -> DatalensBlock {
+    DatalensBlock {
+        chain_id: 46,
+        block_number,
+        block_hash: block_hash.to_owned(),
+        parent_hash: Some(parent_hash.to_owned()),
+    }
 }

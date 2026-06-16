@@ -518,6 +518,7 @@ fn log(topic: &str, address: &str, data: Vec<u8>) -> DatalensLog {
         chain_id: 1,
         block_number: 100,
         block_hash: None,
+        parent_hash: None,
         block_timestamp: Some(1_700_000_000_000),
         transaction_hash: bytes_hex(0xaa),
         transaction_index: Some(2),
