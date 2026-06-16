@@ -4,11 +4,12 @@ use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{Html, IntoResponse},
     routing::{get, post},
 };
 use sqlx::PgPool;
+use tower_http::cors::{Any, CorsLayer};
 
 use super::QueryRoot;
 use crate::ops;
@@ -30,6 +31,14 @@ pub fn build_router(schema: IndexerGraphqlSchema, pool: PgPool) -> Router {
         .route("/graphql", post(graphql_handler))
         .route("/graphiql", get(graphql_graphiql))
         .with_state(HttpState { schema, pool })
+        .layer(cors_layer())
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any)
 }
 
 async fn graphql_handler(

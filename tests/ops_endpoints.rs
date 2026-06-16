@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, to_bytes},
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode, header},
 };
 use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -53,6 +53,64 @@ async fn test_readyz_reports_service_unavailable_when_database_is_unreachable() 
         .expect("readyz response");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_graphql_preflight_allows_msgscan_origin() {
+    let pool = unreachable_pool();
+    let app = build_router(build_schema(pool.clone()), pool);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/graphql")
+                .header(header::ORIGIN, "https://msgport-scan.ringdao.com")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(Body::empty())
+                .expect("cors preflight request"),
+        )
+        .await
+        .expect("cors preflight response");
+
+    assert!(response.status().is_success());
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"*".parse().expect("wildcard header"))
+    );
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("POST"))
+    );
+}
+
+#[tokio::test]
+async fn test_graphql_response_allows_msgscan_origin() {
+    let pool = unreachable_pool();
+    let app = build_router(build_schema(pool.clone()), pool);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/graphql")
+                .header(header::ORIGIN, "https://msgport-scan.ringdao.com")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"query":"{ __typename }"}"#))
+                .expect("graphql cors request"),
+        )
+        .await
+        .expect("graphql cors response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&"*".parse().expect("wildcard header"))
+    );
 }
 
 #[tokio::test]
