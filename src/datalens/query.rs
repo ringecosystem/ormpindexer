@@ -107,6 +107,8 @@ struct NativeLogRow {
     #[serde(default)]
     block_hash: Option<String>,
     #[serde(default)]
+    parent_hash: Option<String>,
+    #[serde(default)]
     block_timestamp: Option<u64>,
     transaction_hash: String,
     transaction_index: i32,
@@ -132,6 +134,7 @@ impl NativeLogRow {
             chain_id,
             block_number: self.block_number,
             block_hash: self.block_hash,
+            parent_hash: self.parent_hash,
             block_timestamp: self.block_timestamp,
             transaction_hash: self.transaction_hash,
             transaction_index: Some(self.transaction_index),
@@ -165,6 +168,8 @@ struct NativeTronEventRow {
     block_number: u64,
     #[serde(default)]
     block_hash: Option<String>,
+    #[serde(default)]
+    parent_hash: Option<String>,
     block_timestamp: u64,
     transaction_index: i32,
     event_index: u64,
@@ -199,6 +204,7 @@ impl NativeTronEventRow {
             chain_id,
             block_number: self.block_number,
             block_hash: self.block_hash,
+            parent_hash: self.parent_hash,
             block_timestamp: Some(self.block_timestamp),
             transaction_hash: self.transaction_id,
             transaction_index: Some(self.transaction_index),
@@ -400,13 +406,17 @@ fn native_finality(finality_mode: FinalityMode) -> &'static str {
     match finality_mode {
         FinalityMode::Finalized => "durable_only",
         FinalityMode::Durable => "durable_only",
+        FinalityMode::Safe => "safe_to_latest",
+        FinalityMode::Latest => "latest_only",
     }
 }
 
-pub(super) fn chain_head_finality(finality_mode: FinalityMode) -> &'static str {
+pub fn chain_head_finality(finality_mode: FinalityMode) -> &'static str {
     match finality_mode {
         FinalityMode::Finalized => "finalized",
         FinalityMode::Durable => "finalized",
+        FinalityMode::Safe => "safe",
+        FinalityMode::Latest => "latest",
     }
 }
 

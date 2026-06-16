@@ -311,6 +311,7 @@ fn evm_log(
         chain_id: 1,
         block_number,
         block_hash: Some(transaction_hash.clone()),
+        parent_hash: None,
         block_timestamp: Some(1_700_000_000_000 + block_number - 100),
         transaction_hash,
         transaction_index: Some(transaction_index),

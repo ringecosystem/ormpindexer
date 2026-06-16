@@ -105,7 +105,16 @@ impl DatalensLogReader for RecordingDatalensReader {
             anyhow::bail!("{error}");
         }
         Ok(DatalensLogQueryResult {
-            logs: self.logs.clone(),
+            logs: self
+                .logs
+                .iter()
+                .filter(|log| {
+                    log.chain_id == query.chain_id
+                        && log.block_number >= query.from_block
+                        && log.block_number <= query.to_block
+                })
+                .cloned()
+                .collect(),
         })
     }
 

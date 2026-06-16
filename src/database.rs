@@ -2,8 +2,8 @@ use anyhow::Context;
 use sqlx::{PgPool, Postgres, Transaction, migrate::Migrator, postgres::PgPoolOptions};
 
 use crate::{
-    checkpoint::CheckpointStore,
-    config::SecretString,
+    checkpoint::{BlockAnchor, CheckpointStore},
+    config::{FinalityMode, SecretString},
     schema::{
         AssignmentConfig, EventSource, LEGACY_B49E_ARBITRUM_FROM_BLOCK,
         LEGACY_B49E_DARWINIA_FROM_BLOCK, LEGACY_B49E_ORACLE, LEGACY_B49E_ORACLE_FROM_BLOCK,
@@ -90,11 +90,125 @@ impl CheckpointStore for PostgresCheckpointStore {
 
         Ok(())
     }
+
+    async fn upsert_block_anchors(&self, anchors: &[BlockAnchor]) -> anyhow::Result<()> {
+        if anchors.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin ORMP block anchor transaction")?;
+        upsert_block_anchors_tx(&mut tx, anchors).await?;
+        tx.commit()
+            .await
+            .context("commit ORMP block anchor transaction")?;
+        Ok(())
+    }
+
+    async fn read_block_anchors(
+        &self,
+        chain_id: u64,
+        dataset: &str,
+        from_block: u64,
+        to_block: u64,
+    ) -> anyhow::Result<Vec<BlockAnchor>> {
+        let rows = sqlx::query_as::<_, BlockAnchorDbRow>(
+            "SELECT
+                chain_id::TEXT AS chain_id,
+                dataset,
+                block_number::TEXT AS block_number,
+                block_hash,
+                parent_hash,
+                finality
+             FROM ormp_indexer_block_anchor
+             WHERE chain_id = $1::NUMERIC
+               AND dataset = $2
+               AND block_number >= $3::NUMERIC
+               AND block_number <= $4::NUMERIC
+             ORDER BY block_number ASC",
+        )
+        .bind(chain_id.to_string())
+        .bind(dataset)
+        .bind(from_block.to_string())
+        .bind(to_block.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .context("read ORMP block anchors")?;
+
+        rows.into_iter()
+            .map(BlockAnchorDbRow::into_anchor)
+            .collect()
+    }
+
+    async fn rollback_legacy_from(
+        &self,
+        chain_id: u64,
+        dataset: &str,
+        rollback_block: u64,
+    ) -> anyhow::Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin ORMP rollback transaction")?;
+
+        for table in LEGACY_ROLLBACK_TABLES {
+            let sql = format!(
+                "DELETE FROM {table}
+                 WHERE chain_id = $1::NUMERIC AND block_number >= $2::NUMERIC"
+            );
+            sqlx::query(&sql)
+                .bind(chain_id.to_string())
+                .bind(rollback_block.to_string())
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("rollback {table} rows"))?;
+        }
+
+        sqlx::query(
+            "DELETE FROM ormp_indexer_block_anchor
+             WHERE chain_id = $1::NUMERIC AND dataset = $2 AND block_number >= $3::NUMERIC",
+        )
+        .bind(chain_id.to_string())
+        .bind(dataset)
+        .bind(rollback_block.to_string())
+        .execute(&mut *tx)
+        .await
+        .context("rollback ORMP block anchors")?;
+
+        upsert_checkpoint_tx(&mut tx, chain_id, dataset, rollback_block).await?;
+
+        tx.commit()
+            .await
+            .context("commit ORMP rollback transaction")?;
+        Ok(())
+    }
 }
 
 #[allow(async_fn_in_trait)]
 pub trait EventWriter {
     async fn write_events(&self, events: &[LegacyOrmPEvent]) -> anyhow::Result<usize>;
+
+    async fn write_events_and_advance_checkpoint<C>(
+        &self,
+        checkpoints: &C,
+        events: &[LegacyOrmPEvent],
+        anchors: &[BlockAnchor],
+        chain_id: u64,
+        dataset: &str,
+        next_block: u64,
+    ) -> anyhow::Result<usize>
+    where
+        C: CheckpointStore + Sync,
+    {
+        let written = self.write_events(events).await?;
+        checkpoints.upsert_block_anchors(anchors).await?;
+        checkpoints.advance(chain_id, dataset, next_block).await?;
+        Ok(written)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -150,6 +264,122 @@ impl EventWriter for PostgresEventWriter {
 
         Ok(events.len())
     }
+
+    async fn write_events_and_advance_checkpoint<C>(
+        &self,
+        _checkpoints: &C,
+        events: &[LegacyOrmPEvent],
+        anchors: &[BlockAnchor],
+        chain_id: u64,
+        dataset: &str,
+        next_block: u64,
+    ) -> anyhow::Result<usize>
+    where
+        C: CheckpointStore + Sync,
+    {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin ORMP indexed range transaction")?;
+
+        for event in events {
+            write_legacy_event(&mut tx, event.clone(), &self.assignment_config).await?;
+        }
+        upsert_block_anchors_tx(&mut tx, anchors).await?;
+        upsert_checkpoint_tx(&mut tx, chain_id, dataset, next_block).await?;
+
+        tx.commit()
+            .await
+            .context("commit ORMP indexed range transaction")?;
+
+        Ok(events.len())
+    }
+}
+
+const LEGACY_ROLLBACK_TABLES: &[&str] = &[
+    "ormp_hash_imported",
+    "ormp_message_accepted",
+    "ormp_message_assigned",
+    "ormp_message_dispatched",
+    "msgport_message_recv",
+    "msgport_message_sent",
+    "signature_pub_signature_submittion",
+];
+
+#[derive(sqlx::FromRow)]
+struct BlockAnchorDbRow {
+    chain_id: String,
+    dataset: String,
+    block_number: String,
+    block_hash: String,
+    parent_hash: Option<String>,
+    finality: String,
+}
+
+impl BlockAnchorDbRow {
+    fn into_anchor(self) -> anyhow::Result<BlockAnchor> {
+        Ok(BlockAnchor {
+            chain_id: self.chain_id.parse()?,
+            dataset: self.dataset,
+            block_number: self.block_number.parse()?,
+            block_hash: self.block_hash,
+            parent_hash: self.parent_hash,
+            finality: self.finality.parse::<FinalityMode>()?,
+        })
+    }
+}
+
+async fn upsert_block_anchors_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    anchors: &[BlockAnchor],
+) -> anyhow::Result<()> {
+    for anchor in anchors {
+        sqlx::query(
+            "INSERT INTO ormp_indexer_block_anchor (
+                chain_id, dataset, block_number, block_hash, parent_hash, finality, updated_at
+             )
+             VALUES ($1::NUMERIC, $2, $3::NUMERIC, $4, $5, $6, now())
+             ON CONFLICT (chain_id, dataset, block_number) DO UPDATE SET
+                block_hash = EXCLUDED.block_hash,
+                parent_hash = EXCLUDED.parent_hash,
+                finality = EXCLUDED.finality,
+                updated_at = EXCLUDED.updated_at",
+        )
+        .bind(anchor.chain_id.to_string())
+        .bind(&anchor.dataset)
+        .bind(anchor.block_number.to_string())
+        .bind(&anchor.block_hash)
+        .bind(&anchor.parent_hash)
+        .bind(anchor.finality.as_str())
+        .execute(&mut **tx)
+        .await
+        .context("upsert ORMP block anchor")?;
+    }
+    Ok(())
+}
+
+async fn upsert_checkpoint_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    chain_id: u64,
+    dataset: &str,
+    next_block: u64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO ormp_indexer_checkpoint (chain_id, dataset, next_block, updated_at)
+         VALUES ($1::NUMERIC, $2, $3::NUMERIC, now())
+         ON CONFLICT (chain_id, dataset) DO UPDATE SET
+            next_block = EXCLUDED.next_block,
+            updated_at = EXCLUDED.updated_at",
+    )
+    .bind(chain_id.to_string())
+    .bind(dataset)
+    .bind(next_block.to_string())
+    .execute(&mut **tx)
+    .await
+    .context("upsert ORMP checkpoint")?;
+
+    Ok(())
 }
 
 async fn write_legacy_event(

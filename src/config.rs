@@ -16,6 +16,7 @@ pub struct RuntimeConfig {
     pub batch_size: u64,
     pub start_block: u64,
     pub finality_mode: FinalityMode,
+    pub reorg_window_blocks: u64,
     pub poll_interval: Duration,
 }
 
@@ -53,9 +54,17 @@ impl RuntimeConfig {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
+        let finality_mode = optional_env(env, "ORMPINDEXER_FINALITY_MODE")
+            .as_deref()
+            .map(str::parse)
+            .transpose()?
+            .unwrap_or(FinalityMode::Finalized);
+
         let enabled_chains = chain_ids
             .into_iter()
-            .map(|chain_id| ChainConfig::from_env_map(env, chain_id, start_block, batch_size))
+            .map(|chain_id| {
+                ChainConfig::from_env_map(env, chain_id, start_block, batch_size, finality_mode)
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let warmup_chunk_size =
@@ -77,6 +86,15 @@ impl RuntimeConfig {
             optional_u64(env, "ORMPINDEXER_DATALENS_HEAD_BUFFER_BLOCKS")?.unwrap_or(1);
         let datalens_min_request_interval_ms =
             optional_u64(env, "ORMPINDEXER_DATALENS_MIN_REQUEST_INTERVAL_MS")?.unwrap_or(100);
+        let reorg_window_blocks =
+            optional_u64(env, "ORMPINDEXER_REORG_WINDOW_BLOCKS")?.unwrap_or(128);
+        if reorg_window_blocks == 0
+            && enabled_chains
+                .iter()
+                .any(|chain| chain.finality_mode.uses_reorg_protection())
+        {
+            bail!("ORMPINDEXER_REORG_WINDOW_BLOCKS must be greater than zero");
+        }
 
         Ok(Self {
             datalens: DatalensConfig {
@@ -106,11 +124,8 @@ impl RuntimeConfig {
             enabled_chains,
             batch_size,
             start_block: start_block.unwrap_or(0),
-            finality_mode: optional_env(env, "ORMPINDEXER_FINALITY_MODE")
-                .as_deref()
-                .map(str::parse)
-                .transpose()?
-                .unwrap_or(FinalityMode::Finalized),
+            finality_mode,
+            reorg_window_blocks,
             poll_interval: Duration::from_secs(
                 optional_u64(env, "ORMPINDEXER_POLL_INTERVAL_SECS")?.unwrap_or(30),
             ),
@@ -142,6 +157,7 @@ pub struct ChainConfig {
     pub batch_size: u64,
     pub contracts: Vec<String>,
     pub topics: Vec<String>,
+    pub finality_mode: FinalityMode,
 }
 
 impl ChainConfig {
@@ -150,6 +166,7 @@ impl ChainConfig {
         chain_id: u64,
         default_start_block: Option<u64>,
         default_batch_size: u64,
+        default_finality_mode: FinalityMode,
     ) -> anyhow::Result<Self> {
         let prefix = format!("ORMPINDEXER_CHAIN_{chain_id}");
         let default = default_chain_config(chain_id)?;
@@ -169,6 +186,11 @@ impl ChainConfig {
         if batch_size == 0 {
             bail!("{prefix}_BATCH_SIZE must be greater than zero");
         }
+        let finality_mode = optional_env(env, &format!("{prefix}_FINALITY_MODE"))
+            .as_deref()
+            .map(str::parse)
+            .transpose()?
+            .unwrap_or(default_finality_mode);
 
         Ok(Self {
             chain_id,
@@ -184,6 +206,7 @@ impl ChainConfig {
             } else {
                 topics
             },
+            finality_mode,
         })
     }
 }
@@ -192,6 +215,8 @@ impl ChainConfig {
 pub enum FinalityMode {
     Finalized,
     Durable,
+    Safe,
+    Latest,
 }
 
 impl FinalityMode {
@@ -199,7 +224,13 @@ impl FinalityMode {
         match self {
             Self::Finalized => "finalized",
             Self::Durable => "durable",
+            Self::Safe => "safe",
+            Self::Latest => "latest",
         }
+    }
+
+    pub fn uses_reorg_protection(self) -> bool {
+        matches!(self, Self::Safe | Self::Latest)
     }
 }
 
@@ -210,7 +241,9 @@ impl std::str::FromStr for FinalityMode {
         match value {
             "finalized" => Ok(Self::Finalized),
             "durable" => Ok(Self::Durable),
-            _ => bail!("ORMPINDEXER_FINALITY_MODE must be finalized or durable"),
+            "safe" => Ok(Self::Safe),
+            "latest" => Ok(Self::Latest),
+            _ => bail!("ORMPINDEXER_FINALITY_MODE must be finalized, durable, safe, or latest"),
         }
     }
 }

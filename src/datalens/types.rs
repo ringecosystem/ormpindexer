@@ -23,6 +23,8 @@ pub struct DatalensLog {
     pub block_number: u64,
     #[serde(default, alias = "block_hash")]
     pub block_hash: Option<String>,
+    #[serde(default, alias = "parent_hash")]
+    pub parent_hash: Option<String>,
     #[serde(default, alias = "block_timestamp")]
     pub block_timestamp: Option<u64>,
     #[serde(alias = "transaction_hash")]

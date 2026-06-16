@@ -116,6 +116,7 @@ pub fn default_evm_chain_config(chain_id: u64) -> anyhow::Result<ChainConfig> {
         batch_size: 1_000,
         contracts: default_contracts(default.include_signature_pub),
         topics: default_topics(default.include_signature_pub),
+        finality_mode: FinalityMode::Finalized,
     })
 }
 
@@ -147,6 +148,7 @@ pub fn default_tron_chain_config() -> anyhow::Result<ChainConfig> {
             TRON_MESSAGE_DISPATCHED_EVENT.to_owned(),
             TRON_SIGNATURE_SUBMITTION_EVENT.to_owned(),
         ],
+        finality_mode: FinalityMode::Finalized,
     })
 }
 

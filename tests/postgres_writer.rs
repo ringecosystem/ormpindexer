@@ -1,9 +1,12 @@
 use sqlx::PgPool;
 
-use ormpindexer::schema::{LEGACY_MIXED_CASE_ACCEPTED_ID, LEGACY_MIXED_CASE_ACCEPTED_ORACLE};
 use ormpindexer::{
+    checkpoint::{BlockAnchor, CheckpointStore},
+    config::FinalityMode,
+    database::PostgresCheckpointStore,
     database::{EventWriter, PostgresEventWriter, apply_migrations},
     schema::{ADDRESS_ORACLE, ADDRESS_RELAYER, ChainLogMetadata, EventSource, LegacyOrmPEvent},
+    schema::{LEGACY_MIXED_CASE_ACCEPTED_ID, LEGACY_MIXED_CASE_ACCEPTED_ORACLE},
 };
 
 #[tokio::test]
@@ -160,6 +163,78 @@ async fn test_postgres_writer_inserts_legacy_events_idempotently_and_backfills_a
     assert_eq!(late.3.as_deref(), Some(ADDRESS_RELAYER[0]));
     assert_eq!(late.4, Some(true));
     assert_eq!(late.5.as_deref(), Some("66"));
+}
+
+#[tokio::test]
+async fn test_postgres_rollback_deletes_legacy_rows_anchors_and_resets_checkpoint() {
+    let Some(database_url) = test_database_url() else {
+        eprintln!("skipping Postgres rollback test; ORMPINDEXER_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect test postgres");
+    apply_migrations(&pool).await.expect("apply migrations");
+    truncate_legacy_tables(&pool).await;
+
+    let checkpoints = PostgresCheckpointStore::new(pool.clone());
+    checkpoints
+        .read_or_create(46, "evm.logs", 10)
+        .await
+        .expect("seed checkpoint");
+    checkpoints
+        .advance(46, "evm.logs", 130)
+        .await
+        .expect("advance checkpoint");
+    checkpoints
+        .upsert_block_anchors(&[
+            BlockAnchor {
+                chain_id: 46,
+                dataset: "evm.logs".to_owned(),
+                block_number: 122,
+                block_hash: "0xold".to_owned(),
+                parent_hash: Some("0xold-parent".to_owned()),
+                finality: FinalityMode::Latest,
+            },
+            BlockAnchor {
+                chain_id: 46,
+                dataset: "evm.logs".to_owned(),
+                block_number: 123,
+                block_hash: "0xremoved".to_owned(),
+                parent_hash: Some("0xremoved-parent".to_owned()),
+                finality: FinalityMode::Latest,
+            },
+        ])
+        .await
+        .expect("seed anchors");
+
+    let writer = PostgresEventWriter::new(pool.clone());
+    writer
+        .write_events(&rollback_legacy_events())
+        .await
+        .expect("write rollback legacy events");
+
+    checkpoints
+        .rollback_legacy_from(46, "evm.logs", 123)
+        .await
+        .expect("rollback legacy rows");
+
+    assert_table_count(&pool, "ormp_hash_imported", 0).await;
+    assert_table_count(&pool, "ormp_message_accepted", 0).await;
+    assert_table_count(&pool, "ormp_message_assigned", 0).await;
+    assert_table_count(&pool, "ormp_message_dispatched", 0).await;
+    assert_table_count(&pool, "msgport_message_recv", 0).await;
+    assert_table_count(&pool, "msgport_message_sent", 0).await;
+    assert_table_count(&pool, "signature_pub_signature_submittion", 0).await;
+    assert_table_count(&pool, "ormp_indexer_block_anchor", 1).await;
+    assert_eq!(
+        checkpoints
+            .read_or_create(46, "evm.logs", 10)
+            .await
+            .expect("read checkpoint")
+            .next_block,
+        123
+    );
 }
 
 fn legacy_events() -> Vec<LegacyOrmPEvent> {
@@ -392,6 +467,71 @@ fn legacy_events() -> Vec<LegacyOrmPEvent> {
     ]
 }
 
+fn rollback_legacy_events() -> Vec<LegacyOrmPEvent> {
+    vec![
+        LegacyOrmPEvent::HashImported {
+            metadata: evm_metadata("rollback-hash-log"),
+            src_chain_id: 1,
+            target_chain_id: 46,
+            oracle: ADDRESS_ORACLE[0].to_owned(),
+            channel: "0xchannel".to_owned(),
+            msg_index: 7,
+            hash: "0xhash".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAccepted {
+            metadata: evm_metadata("rollback-accepted-log"),
+            msg_hash: "0xrollback-accepted".to_owned(),
+            channel: "0xchannel".to_owned(),
+            index: 8,
+            from_chain_id: 1,
+            from: "0xfrom".to_owned(),
+            to_chain_id: 46,
+            to: "0xto".to_owned(),
+            gas_limit: 500_000,
+            encoded: "0xencoded".to_owned(),
+        },
+        LegacyOrmPEvent::MessageAssigned {
+            metadata: evm_metadata("rollback-assigned-log"),
+            msg_hash: "0xrollback-accepted".to_owned(),
+            oracle: ADDRESS_ORACLE[0].to_owned(),
+            relayer: ADDRESS_RELAYER[0].to_owned(),
+            oracle_fee: 11,
+            relayer_fee: 22,
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::MessageDispatched {
+            metadata: evm_metadata("rollback-dispatched-log"),
+            target_chain_id: 46,
+            msg_hash: "0xrollback-accepted".to_owned(),
+            dispatch_result: true,
+        },
+        LegacyOrmPEvent::MsgportMessageRecv {
+            metadata: evm_metadata("rollback-recv-log"),
+            msg_id: "0xmsgid".to_owned(),
+            result: true,
+            return_data: "0xreturn".to_owned(),
+        },
+        LegacyOrmPEvent::MsgportMessageSent {
+            metadata: evm_metadata("rollback-sent-log"),
+            msg_id: "0xmsgid".to_owned(),
+            from_dapp: "0xfromdapp".to_owned(),
+            to_chain_id: 46,
+            to_dapp: "0xtodapp".to_owned(),
+            message: "0xmessage".to_owned(),
+            params: "0xparams".to_owned(),
+        },
+        LegacyOrmPEvent::SignatureSubmittion {
+            metadata: evm_metadata("rollback-signature-log"),
+            chain_id: 46,
+            channel: "0xchannel".to_owned(),
+            signer: "0xsigner".to_owned(),
+            msg_index: 9,
+            signature: "0xsig".to_owned(),
+            data: "0xdata".to_owned(),
+        },
+    ]
+}
+
 fn evm_metadata(id: &str) -> ChainLogMetadata {
     evm_metadata_at(id, 46, 123)
 }
@@ -402,7 +542,7 @@ fn evm_metadata_at(id: &str, chain_id: u128, block_number: u128) -> ChainLogMeta
         source: EventSource::Evm,
         chain_id,
         block_number,
-        block_hash: None,
+        block_hash: Some("0xblock".to_owned()),
         block_timestamp: 456,
         transaction_hash: "0xtx".to_owned(),
         transaction_index: 2,
@@ -439,6 +579,8 @@ async fn assert_table_count(pool: &PgPool, table: &str, expected: i64) {
 async fn truncate_legacy_tables(pool: &PgPool) {
     sqlx::query(
         "TRUNCATE
+            ormp_indexer_block_anchor,
+            ormp_indexer_checkpoint,
             ormp_hash_imported,
             ormp_message_accepted,
             ormp_message_assigned,
