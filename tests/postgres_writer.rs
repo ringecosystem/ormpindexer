@@ -5,7 +5,10 @@ use ormpindexer::{
     config::FinalityMode,
     database::PostgresCheckpointStore,
     database::{EventWriter, PostgresEventWriter, apply_migrations},
-    schema::{ADDRESS_ORACLE, ADDRESS_RELAYER, ChainLogMetadata, EventSource, LegacyOrmPEvent},
+    schema::{
+        ADDRESS_ORACLE, ADDRESS_RELAYER, AssignmentConfig, ChainLogMetadata, EventSource,
+        LegacyOrmPEvent,
+    },
     schema::{LEGACY_MIXED_CASE_ACCEPTED_ID, LEGACY_MIXED_CASE_ACCEPTED_ORACLE},
 };
 
@@ -337,6 +340,86 @@ async fn test_postgres_rollback_recomputes_assignment_backfills_for_remaining_ac
     assert_eq!(restored.1, Some(true));
     assert_eq!(restored.2.as_deref(), Some("33"));
     assert_eq!(restored.3.as_deref(), Some(ADDRESS_RELAYER[0]));
+    assert_eq!(restored.4, Some(true));
+    assert_eq!(restored.5.as_deref(), Some("44"));
+}
+
+#[tokio::test]
+async fn test_postgres_rollback_recomputes_assignment_backfills_with_configured_policy() {
+    let Some(database_url) = test_database_url() else {
+        eprintln!(
+            "skipping Postgres configured assignment rollback test; ORMPINDEXER_TEST_DATABASE_URL is not set"
+        );
+        return;
+    };
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect test postgres");
+    apply_migrations(&pool).await.expect("apply migrations");
+    truncate_legacy_tables(&pool).await;
+
+    let oracle = "0x00000000000000000000000000000000000000a1";
+    let relayer = "0x00000000000000000000000000000000000000b2";
+    let assignment_config = AssignmentConfig {
+        oracle_addresses: vec![oracle.to_owned()],
+        relayer_addresses: vec![relayer.to_owned()],
+    };
+    let writer =
+        PostgresEventWriter::with_assignment_config(pool.clone(), assignment_config.clone());
+    writer
+        .write_events(&[
+            LegacyOrmPEvent::MessageAccepted {
+                metadata: evm_metadata_at("rollback-configured-accepted-log", 46, 121),
+                msg_hash: "0xrollback-configured".to_owned(),
+                channel: "0xchannel".to_owned(),
+                index: 3,
+                from_chain_id: 1,
+                from: "0xfrom".to_owned(),
+                to_chain_id: 46,
+                to: "0xto".to_owned(),
+                gas_limit: 500_000,
+                encoded: "0xencoded".to_owned(),
+            },
+            LegacyOrmPEvent::MessageAssigned {
+                metadata: evm_metadata_at("rollback-configured-old-assigned-log", 46, 122),
+                msg_hash: "0xrollback-configured".to_owned(),
+                oracle: oracle.to_owned(),
+                relayer: relayer.to_owned(),
+                oracle_fee: 33,
+                relayer_fee: 44,
+                params: "0xparams".to_owned(),
+            },
+            LegacyOrmPEvent::MessageAssigned {
+                metadata: evm_metadata_at("rollback-configured-new-assigned-log", 46, 123),
+                msg_hash: "0xrollback-configured".to_owned(),
+                oracle: oracle.to_owned(),
+                relayer: relayer.to_owned(),
+                oracle_fee: 55,
+                relayer_fee: 66,
+                params: "0xparams".to_owned(),
+            },
+        ])
+        .await
+        .expect("write configured assignment events");
+
+    let before = all_assignment_fields(&pool, "0xrollback-configured").await;
+    assert_eq!(before.0.as_deref(), Some(oracle));
+    assert_eq!(before.2.as_deref(), Some("55"));
+    assert_eq!(before.3.as_deref(), Some(relayer));
+    assert_eq!(before.5.as_deref(), Some("66"));
+
+    let checkpoints =
+        PostgresCheckpointStore::with_assignment_config(pool.clone(), assignment_config);
+    checkpoints
+        .rollback_legacy_from(46, "evm.logs", 123)
+        .await
+        .expect("rollback legacy rows");
+
+    let restored = all_assignment_fields(&pool, "0xrollback-configured").await;
+    assert_eq!(restored.0.as_deref(), Some(oracle));
+    assert_eq!(restored.1, Some(true));
+    assert_eq!(restored.2.as_deref(), Some("33"));
+    assert_eq!(restored.3.as_deref(), Some(relayer));
     assert_eq!(restored.4, Some(true));
     assert_eq!(restored.5.as_deref(), Some("44"));
 }

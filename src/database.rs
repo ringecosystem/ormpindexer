@@ -33,11 +33,22 @@ pub async fn apply_migrations(pool: &PgPool) -> anyhow::Result<()> {
 #[derive(Clone)]
 pub struct PostgresCheckpointStore {
     pool: PgPool,
+    assignment_config: AssignmentConfig,
 }
 
 impl PostgresCheckpointStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            assignment_config: AssignmentConfig::legacy_defaults(),
+        }
+    }
+
+    pub fn with_assignment_config(pool: PgPool, assignment_config: AssignmentConfig) -> Self {
+        Self {
+            pool,
+            assignment_config,
+        }
     }
 }
 
@@ -179,12 +190,8 @@ impl CheckpointStore for PostgresCheckpointStore {
                 .with_context(|| format!("rollback {table} rows"))?;
         }
 
-        recompute_accepted_assignments_tx(
-            &mut tx,
-            &assignment_msg_hashes,
-            &AssignmentConfig::legacy_defaults(),
-        )
-        .await?;
+        recompute_accepted_assignments_tx(&mut tx, &assignment_msg_hashes, &self.assignment_config)
+            .await?;
 
         sqlx::query(
             "DELETE FROM ormp_indexer_block_anchor
