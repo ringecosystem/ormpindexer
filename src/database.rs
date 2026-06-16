@@ -155,6 +155,17 @@ impl CheckpointStore for PostgresCheckpointStore {
             .await
             .context("begin ORMP rollback transaction")?;
 
+        let assignment_msg_hashes =
+            rolled_back_assignment_msg_hashes_tx(&mut tx, chain_id, rollback_block).await?;
+
+        delete_signature_submittions_by_source_anchors_tx(
+            &mut tx,
+            chain_id,
+            dataset,
+            rollback_block,
+        )
+        .await?;
+
         for table in LEGACY_ROLLBACK_TABLES {
             let sql = format!(
                 "DELETE FROM {table}
@@ -167,6 +178,13 @@ impl CheckpointStore for PostgresCheckpointStore {
                 .await
                 .with_context(|| format!("rollback {table} rows"))?;
         }
+
+        recompute_accepted_assignments_tx(
+            &mut tx,
+            &assignment_msg_hashes,
+            &AssignmentConfig::legacy_defaults(),
+        )
+        .await?;
 
         sqlx::query(
             "DELETE FROM ormp_indexer_block_anchor
@@ -306,6 +324,109 @@ const LEGACY_ROLLBACK_TABLES: &[&str] = &[
     "msgport_message_sent",
     "signature_pub_signature_submittion",
 ];
+
+async fn rolled_back_assignment_msg_hashes_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    chain_id: u64,
+    rollback_block: u64,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT DISTINCT msg_hash
+         FROM ormp_message_assigned
+         WHERE chain_id = $1::NUMERIC AND block_number >= $2::NUMERIC",
+    )
+    .bind(chain_id.to_string())
+    .bind(rollback_block.to_string())
+    .fetch_all(&mut **tx)
+    .await
+    .context("load rolled back assignment message hashes")?;
+
+    Ok(rows.into_iter().map(|(msg_hash,)| msg_hash).collect())
+}
+
+async fn delete_signature_submittions_by_source_anchors_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    chain_id: u64,
+    dataset: &str,
+    rollback_block: u64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "DELETE FROM signature_pub_signature_submittion signatures
+         USING ormp_indexer_block_anchor anchors
+         WHERE anchors.chain_id = $1::NUMERIC
+           AND anchors.dataset = $2
+           AND anchors.block_number >= $3::NUMERIC
+           AND signatures.block_number = anchors.block_number
+           AND signatures.id LIKE
+                LPAD(TRUNC(anchors.block_number)::TEXT, 10, '0')
+                || '-'
+                || LOWER(LEFT(REGEXP_REPLACE(anchors.block_hash, '^0[xX]', ''), 5))
+                || '-%'",
+    )
+    .bind(chain_id.to_string())
+    .bind(dataset)
+    .bind(rollback_block.to_string())
+    .execute(&mut **tx)
+    .await
+    .context("rollback signature_pub_signature_submittion rows by source anchors")?;
+
+    Ok(())
+}
+
+async fn recompute_accepted_assignments_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    msg_hashes: &[String],
+    assignment_config: &AssignmentConfig,
+) -> anyhow::Result<()> {
+    if msg_hashes.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "UPDATE ormp_message_accepted
+         SET
+            oracle = NULL,
+            oracle_assigned = NULL,
+            oracle_assigned_fee = NULL,
+            relayer = NULL,
+            relayer_assigned = NULL,
+            relayer_assigned_fee = NULL
+         WHERE msg_hash = ANY($1::TEXT[])",
+    )
+    .bind(msg_hashes)
+    .execute(&mut **tx)
+    .await
+    .context("clear rolled back accepted assignment fields")?;
+
+    let assignments = sqlx::query_as::<_, OrmpMessageAssignedDbRow>(
+        "SELECT
+            id,
+            block_number::TEXT AS block_number,
+            transaction_hash,
+            block_timestamp::TEXT AS block_timestamp,
+            chain_id::TEXT AS chain_id,
+            msg_hash,
+            oracle,
+            relayer,
+            oracle_fee::TEXT AS oracle_fee,
+            relayer_fee::TEXT AS relayer_fee,
+            params
+         FROM ormp_message_assigned
+         WHERE msg_hash = ANY($1::TEXT[])
+         ORDER BY block_number ASC, id ASC",
+    )
+    .bind(msg_hashes)
+    .fetch_all(&mut **tx)
+    .await
+    .context("load remaining assignment rows for rollback backfill")?;
+
+    for assignment in assignments {
+        let assignment = assignment.into_schema_row()?;
+        backfill_message_assignment(tx, &assignment, assignment_config).await?;
+    }
+
+    Ok(())
+}
 
 #[derive(sqlx::FromRow)]
 struct BlockAnchorDbRow {
