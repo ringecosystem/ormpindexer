@@ -185,13 +185,12 @@ where
                     chain.chain_id, dataset, chain.start_block
                 )
             })?;
-        if chain.finality_mode.uses_reorg_protection() {
-            if let Some(rollback_block) = self
+        if chain.finality_mode.uses_reorg_protection()
+            && let Some(rollback_block) = self
                 .rollback_reorged_anchors(&chain, dataset, checkpoint.next_block)
                 .await?
-            {
-                checkpoint.next_block = rollback_block;
-            }
+        {
+            checkpoint.next_block = rollback_block;
         }
         let latest_block = self
             .reader

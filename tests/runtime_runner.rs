@@ -274,14 +274,16 @@ async fn test_runner_rolls_back_first_mismatched_anchor_before_processing_safe_r
 
     assert_eq!(report.ranges_queried, 1);
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 24);
-    let queries = reader.queries.lock().expect("queries lock");
-    assert_eq!(
-        queries
-            .iter()
-            .map(|query| (query.from_block, query.to_block, query.finality_mode))
-            .collect::<Vec<_>>(),
-        vec![(20, 23, FinalityMode::Safe)]
-    );
+    {
+        let queries = reader.queries.lock().expect("queries lock");
+        assert_eq!(
+            queries
+                .iter()
+                .map(|query| (query.from_block, query.to_block, query.finality_mode))
+                .collect::<Vec<_>>(),
+            vec![(20, 23, FinalityMode::Safe)]
+        );
+    }
     assert_eq!(
         block_queries
             .lock()
@@ -362,14 +364,16 @@ async fn test_runner_rolls_back_empty_block_that_later_gains_event_after_reorg()
 
     assert_eq!(report.ranges_queried, 1);
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
-    let queries = reader.queries.lock().expect("queries lock");
-    assert_eq!(
-        queries
-            .iter()
-            .map(|query| (query.from_block, query.to_block, query.finality_mode))
-            .collect::<Vec<_>>(),
-        vec![(22, 24, FinalityMode::Safe)]
-    );
+    {
+        let queries = reader.queries.lock().expect("queries lock");
+        assert_eq!(
+            queries
+                .iter()
+                .map(|query| (query.from_block, query.to_block, query.finality_mode))
+                .collect::<Vec<_>>(),
+            vec![(22, 24, FinalityMode::Safe)]
+        );
+    }
     assert_eq!(
         block_queries
             .lock()

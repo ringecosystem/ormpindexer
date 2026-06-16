@@ -81,9 +81,12 @@ pub trait CheckpointStore {
 
 #[derive(Clone, Default)]
 pub struct InMemoryCheckpointStore {
-    checkpoints: Arc<Mutex<BTreeMap<(u64, String), u64>>>,
-    anchors: Arc<Mutex<BTreeMap<(u64, String, u64), BlockAnchor>>>,
+    checkpoints: Arc<Mutex<InMemoryCheckpoints>>,
+    anchors: Arc<Mutex<InMemoryBlockAnchors>>,
 }
+
+type InMemoryCheckpoints = BTreeMap<(u64, String), u64>;
+type InMemoryBlockAnchors = BTreeMap<(u64, String, u64), BlockAnchor>;
 
 impl InMemoryCheckpointStore {
     pub async fn next_block(&self, chain_id: u64, dataset: &str) -> anyhow::Result<u64> {
