@@ -9,7 +9,18 @@ use crate::{
     },
 };
 
-const LOG_FIELDS: [&str; 2] = ["block_timestamp", "transaction_from"];
+const LOG_FIELDS: [&str; 10] = [
+    "block_number",
+    "block_hash",
+    "transaction_hash",
+    "transaction_index",
+    "log_index",
+    "address",
+    "topics",
+    "data",
+    "block_timestamp",
+    "transaction_from",
+];
 
 pub(super) fn log_query_body(query: &DatalensLogQuery) -> anyhow::Result<Value> {
     let mut body = json!({
@@ -44,15 +55,14 @@ pub(super) fn block_query_body(query: &DatalensBlockQuery) -> anyhow::Result<Val
 pub(super) fn query_finality(finality_mode: FinalityMode) -> &'static str {
     match finality_mode {
         FinalityMode::Finalized | FinalityMode::Durable => "durable_only",
-        FinalityMode::Safe => "safe_to_latest",
-        FinalityMode::Latest => "latest_only",
+        FinalityMode::Safe | FinalityMode::Latest => "safe_to_latest",
     }
 }
 
 pub(super) fn head_height(finality_mode: FinalityMode, heads: &WireHeads) -> u64 {
     match finality_mode {
-        FinalityMode::Finalized | FinalityMode::Durable => heads.finalized,
-        FinalityMode::Safe => heads.safe,
+        FinalityMode::Finalized => heads.finalized,
+        FinalityMode::Durable | FinalityMode::Safe => heads.safe,
         FinalityMode::Latest => heads.latest,
     }
 }

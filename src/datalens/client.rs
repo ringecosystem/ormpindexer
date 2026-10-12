@@ -16,7 +16,7 @@ use crate::{
             QueryPage, WireHeads, block_query_body, blocks_from_page, head_height, log_query_body,
             logs_from_page, parse_query_page,
         },
-        retry::{datalens_retry_delay, http_retry_after, is_retryable_http_status},
+        retry::{datalens_retry_delay, is_retryable_http_status, retry_after_header},
         types::{
             DatalensBlockQuery, DatalensBlockQueryResult, DatalensLogQuery, DatalensLogQueryResult,
             DatalensLogReader, IncompleteReason,
@@ -61,7 +61,13 @@ impl DatalensHttpClient {
         let max_attempts = self.config.query_max_attempts;
         for attempt in 1..=max_attempts {
             match self.query_pages(request).await {
-                Ok(page) if page.incomplete_reason.is_none() => return Ok(page),
+                Ok(page)
+                    if !page
+                        .incomplete_reason
+                        .is_some_and(|reason| reason.retries_immediately()) =>
+                {
+                    return Ok(page);
+                }
                 Ok(page) => {
                     let improved = best
                         .as_ref()
@@ -141,11 +147,12 @@ impl DatalensHttpClient {
             }
         };
         let status = response.status();
+        let retry_after = retry_after_header(response.headers());
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) => {
                 return Err(CallError::retryable(
-                    None,
+                    retry_after,
                     format!("{operation} body read failed: {error}"),
                 ));
             }
@@ -155,7 +162,7 @@ impl DatalensHttpClient {
         }
         let detail = format!("{operation} failed with status {status}: {body}");
         if is_retryable_http_status(status) {
-            Err(CallError::retryable(http_retry_after(&body), detail))
+            Err(CallError::retryable(retry_after, detail))
         } else {
             Err(CallError::fatal(anyhow::anyhow!(detail)))
         }
@@ -193,6 +200,36 @@ impl DatalensHttpClient {
             };
             sleep(delay).await;
         }
+    }
+
+    async fn fetch_heads(&self, chain_id: u64) -> anyhow::Result<WireHeads> {
+        let chain_name = crate::datalens::evm_chain_name(chain_id)?;
+        let url = self.url(&format!("/v1/heads/{chain_name}"));
+        let max_attempts = self.config.query_max_attempts;
+        for attempt in 1..=max_attempts {
+            match self
+                .send_once(
+                    "Datalens chain head query",
+                    self.authorized(self.http.get(&url)),
+                )
+                .await
+            {
+                Ok(body) => {
+                    return serde_json::from_str(&body).context("decode Datalens chain heads");
+                }
+                Err(error) if error.retryable && attempt < max_attempts => {
+                    let delay = error.delay.unwrap_or_else(|| datalens_retry_delay(attempt));
+                    log::warn!(
+                        "Datalens chain head query failed attempt={attempt} max_attempts={max_attempts} retry_delay_ms={} error={}",
+                        delay.as_millis(),
+                        error.detail
+                    );
+                    sleep(delay).await;
+                }
+                Err(error) => anyhow::bail!(error.detail),
+            }
+        }
+        unreachable!("query_max_attempts is validated as greater than zero")
     }
 }
 
@@ -232,35 +269,12 @@ impl DatalensLogReader for DatalensHttpClient {
         chain_id: u64,
         finality_mode: FinalityMode,
     ) -> anyhow::Result<u64> {
-        let chain_name = crate::datalens::evm_chain_name(chain_id)?;
-        let url = self.url(&format!("/v1/heads/{chain_name}"));
-        let max_attempts = self.config.query_max_attempts;
-        for attempt in 1..=max_attempts {
-            match self
-                .send_once(
-                    "Datalens chain head query",
-                    self.authorized(self.http.get(&url)),
-                )
-                .await
-            {
-                Ok(body) => {
-                    let heads: WireHeads =
-                        serde_json::from_str(&body).context("decode Datalens chain heads")?;
-                    return Ok(head_height(finality_mode, &heads));
-                }
-                Err(error) if error.retryable && attempt < max_attempts => {
-                    let delay = error.delay.unwrap_or_else(|| datalens_retry_delay(attempt));
-                    log::warn!(
-                        "Datalens chain head query failed attempt={attempt} max_attempts={max_attempts} retry_delay_ms={} error={}",
-                        delay.as_millis(),
-                        error.detail
-                    );
-                    sleep(delay).await;
-                }
-                Err(error) => anyhow::bail!(error.detail),
-            }
-        }
-        unreachable!("query_max_attempts is validated as greater than zero")
+        let heads = self.fetch_heads(chain_id).await?;
+        Ok(head_height(finality_mode, &heads))
+    }
+
+    async fn finalized_head(&self, chain_id: u64) -> anyhow::Result<u64> {
+        Ok(self.fetch_heads(chain_id).await?.finalized)
     }
 
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult> {
@@ -269,6 +283,7 @@ impl DatalensLogReader for DatalensHttpClient {
         let logs = logs_from_page(&page, query.chain_id)?;
         Ok(DatalensLogQueryResult {
             logs,
+            served_start: page.served_start,
             served_end: page.served_end,
             incomplete_reason: page.incomplete_reason,
         })

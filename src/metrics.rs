@@ -41,6 +41,7 @@ pub struct RuntimeMetricsRow {
     pub datalens_block_requests_success_total: u64,
     pub datalens_block_requests_failure_total: u64,
     pub reorg_rollbacks_total: u64,
+    pub incomplete_serves_total: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -183,6 +184,17 @@ pub fn record_datalens_request(chain_id: u64, dataset: &str, operation: &str, su
         }
         _ => {}
     }
+}
+
+pub fn record_incomplete_serve(chain_id: u64, dataset: &str, reason: &str) {
+    let row = runtime_row(chain_id, dataset);
+    let mut state = metrics_state().lock().expect("ORMP metrics mutex");
+    let row = state.runtime_rows.entry(row.0).or_insert(row.1);
+    let count = row
+        .incomplete_serves_total
+        .entry(reason.to_owned())
+        .or_insert(0);
+    *count = count.saturating_add(1);
 }
 
 pub fn record_reorg_rollback(chain_id: u64, dataset: &str) {

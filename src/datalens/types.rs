@@ -20,6 +20,10 @@ impl IncompleteReason {
             Self::NotFollowedYet => "not_followed_yet",
         }
     }
+
+    pub(crate) fn retries_immediately(self) -> bool {
+        matches!(self, Self::Pending | Self::ProviderError)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,6 +103,8 @@ pub struct DatalensLog {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensLogQueryResult {
     pub logs: Vec<DatalensLog>,
+    /// Inclusive start of `served`. `None` when the server served nothing.
+    pub served_start: Option<u64>,
     /// Inclusive end of the served prefix. `None` means the server served nothing.
     pub served_end: Option<u64>,
     pub incomplete_reason: Option<IncompleteReason>,
@@ -114,6 +120,11 @@ impl DatalensLogQueryResult {
 pub trait DatalensLogReader {
     async fn latest_block(&self, chain_id: u64, finality_mode: FinalityMode)
     -> anyhow::Result<u64>;
+
+    async fn finalized_head(&self, chain_id: u64) -> anyhow::Result<u64> {
+        let _ = chain_id;
+        Ok(0)
+    }
 
     async fn query_blocks(
         &self,

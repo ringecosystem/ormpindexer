@@ -20,8 +20,9 @@ struct PartialLogServe {
     chain_id: u64,
     from_block: u64,
     to_block: u64,
+    served_start: Option<u64>,
     served_end: Option<u64>,
-    incomplete_reason: IncompleteReason,
+    incomplete_reason: Option<IncompleteReason>,
 }
 
 #[derive(Clone)]
@@ -29,9 +30,9 @@ pub struct RecordingDatalensReader {
     blocks: Vec<DatalensBlock>,
     logs: Vec<DatalensLog>,
     heads: BTreeMap<u64, u64>,
+    finalized_heads: BTreeMap<u64, u64>,
     query_delays: BTreeMap<u64, Duration>,
     query_failures: BTreeMap<u64, String>,
-    range_query_failures: BTreeMap<(u64, u64, u64), String>,
     partials: Vec<PartialLogServe>,
     pub queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
     block_queries: Arc<Mutex<Vec<DatalensBlockQuery>>>,
@@ -43,9 +44,9 @@ impl RecordingDatalensReader {
             blocks: Vec::new(),
             logs,
             heads: BTreeMap::new(),
+            finalized_heads: BTreeMap::new(),
             query_delays: BTreeMap::new(),
             query_failures: BTreeMap::new(),
-            range_query_failures: BTreeMap::new(),
             partials: Vec::new(),
             queries: Arc::new(Mutex::new(Vec::new())),
             block_queries: Arc::new(Mutex::new(Vec::new())),
@@ -54,6 +55,11 @@ impl RecordingDatalensReader {
 
     pub fn with_head(mut self, chain_id: u64, head: u64) -> Self {
         self.heads.insert(chain_id, head);
+        self
+    }
+
+    pub fn with_finalized_head(mut self, chain_id: u64, finalized: u64) -> Self {
+        self.finalized_heads.insert(chain_id, finalized);
         self
     }
 
@@ -69,8 +75,28 @@ impl RecordingDatalensReader {
             chain_id,
             from_block,
             to_block,
+            served_start: None,
             served_end,
-            incomplete_reason,
+            incomplete_reason: Some(incomplete_reason),
+        });
+        self
+    }
+
+    pub fn with_served_window(
+        mut self,
+        chain_id: u64,
+        from_block: u64,
+        to_block: u64,
+        served_start: u64,
+        served_end: u64,
+    ) -> Self {
+        self.partials.push(PartialLogServe {
+            chain_id,
+            from_block,
+            to_block,
+            served_start: Some(served_start),
+            served_end: Some(served_end),
+            incomplete_reason: None,
         });
         self
     }
@@ -93,18 +119,6 @@ impl RecordingDatalensReader {
         self.query_failures.insert(chain_id, error.to_owned());
         self
     }
-
-    pub fn with_range_query_failure(
-        mut self,
-        chain_id: u64,
-        from_block: u64,
-        to_block: u64,
-        error: &str,
-    ) -> Self {
-        self.range_query_failures
-            .insert((chain_id, from_block, to_block), error.to_owned());
-        self
-    }
 }
 
 impl DatalensLogReader for RecordingDatalensReader {
@@ -124,12 +138,6 @@ impl DatalensLogReader for RecordingDatalensReader {
             .lock()
             .expect("queries lock")
             .push(query.clone());
-        if let Some(error) =
-            self.range_query_failures
-                .get(&(query.chain_id, query.from_block, query.to_block))
-        {
-            anyhow::bail!("{error}");
-        }
         if let Some(error) = self.query_failures.get(&query.chain_id) {
             anyhow::bail!("{error}");
         }
@@ -139,6 +147,7 @@ impl DatalensLogReader for RecordingDatalensReader {
                 && partial.to_block == query.to_block
         }) {
             let served_end = partial.served_end;
+            let served_start = served_end.map(|_| partial.served_start.unwrap_or(query.from_block));
             return Ok(DatalensLogQueryResult {
                 logs: self
                     .logs
@@ -151,8 +160,9 @@ impl DatalensLogReader for RecordingDatalensReader {
                     })
                     .cloned()
                     .collect(),
+                served_start,
                 served_end,
-                incomplete_reason: Some(partial.incomplete_reason),
+                incomplete_reason: partial.incomplete_reason,
             });
         }
         Ok(DatalensLogQueryResult {
@@ -166,9 +176,14 @@ impl DatalensLogReader for RecordingDatalensReader {
                 })
                 .cloned()
                 .collect(),
+            served_start: Some(query.from_block),
             served_end: Some(query.to_block),
             incomplete_reason: None,
         })
+    }
+
+    async fn finalized_head(&self, chain_id: u64) -> anyhow::Result<u64> {
+        Ok(self.finalized_heads.get(&chain_id).copied().unwrap_or(0))
     }
 
     async fn query_blocks(
@@ -248,13 +263,5 @@ pub struct FailingEventWriter;
 impl EventWriter for FailingEventWriter {
     async fn write_events(&self, _events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
         anyhow::bail!("write failed");
-    }
-}
-
-pub struct FailingEventWriterWithMessage(pub &'static str);
-
-impl EventWriter for FailingEventWriterWithMessage {
-    async fn write_events(&self, _events: &[LegacyOrmPEvent]) -> anyhow::Result<usize> {
-        anyhow::bail!(self.0);
     }
 }

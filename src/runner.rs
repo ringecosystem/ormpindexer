@@ -13,8 +13,8 @@ use crate::{
     config::{ChainConfig, RuntimeConfig},
     database::EventWriter,
     datalens::{
-        DatalensBlockQuery, DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult,
-        DatalensLogReader, classify_datalens_failure_message,
+        DatalensBlockQuery, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
+        IncompleteReason,
     },
     decoder::EventDecoder,
     planner::chain_dataset,
@@ -240,7 +240,7 @@ where
             range.to_block = range.to_block.min(target_block);
 
             let range_report = self
-                .process_range_with_splitting(&chain, dataset, range, target_block)
+                .process_range(&chain, dataset, range, target_block)
                 .await?;
             report.ranges_queried += range_report.ranges_queried;
             report.records_read += range_report.records_read;
@@ -258,73 +258,35 @@ where
         Ok(report)
     }
 
-    async fn process_range_with_splitting(
+    async fn process_range(
         &self,
         chain: &ChainConfig,
         dataset: &str,
         range: BlockRange,
         target_block: u64,
     ) -> anyhow::Result<ProcessedRangeReport> {
-        let mut pending = vec![range];
-        let mut report = ProcessedRangeReport::default();
-
-        while let Some(range) = pending.pop() {
-            log_query_start(chain, dataset, range, target_block);
-            let batch_started = Instant::now();
-            let result = match self.query_range_once(chain, dataset, range).await {
-                Ok(result) => {
-                    crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", true);
-                    result
-                }
-                Err(error) => {
-                    crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", false);
-                    if can_split_datalens_query_failure(&error, range) {
-                        let (left, right) = split_range(range);
-                        log::warn!(
-                            "splitting ORMP Datalens range after retryable failure chain_id={} dataset={} from_block={} to_block={} left_from_block={} left_to_block={} right_from_block={} right_to_block={} error={:#}",
-                            chain.chain_id,
-                            dataset,
-                            range.from_block,
-                            range.to_block,
-                            left.from_block,
-                            left.to_block,
-                            right.from_block,
-                            right.to_block,
-                            error
-                        );
-                        pending.push(right);
-                        pending.push(left);
-                        continue;
-                    }
-
-                    crate::metrics::record_range_failure(chain.chain_id, dataset);
-                    return Err(error);
-                }
-            };
-
-            let range_report = self
-                .process_successful_range(
-                    chain,
-                    dataset,
-                    range,
-                    target_block,
-                    batch_started,
-                    result,
-                )
-                .await?;
-            report.next_block = range_report.next_block;
-            report.ranges_queried += range_report.ranges_queried;
-            report.records_read += range_report.records_read;
-            report.records_decoded += range_report.records_decoded;
-            report.records_written += range_report.records_written;
-            report.checkpoints_advanced += range_report.checkpoints_advanced;
-            report.stop_poll = range_report.stop_poll;
-            if range_report.stop_poll {
-                break;
+        log_query_start(chain, dataset, range, target_block);
+        let batch_started = Instant::now();
+        let result = match self.query_range_once(chain, dataset, range).await {
+            Ok(result) => {
+                crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", true);
+                result
             }
-        }
+            Err(error) => {
+                crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", false);
+                crate::metrics::record_range_failure(chain.chain_id, dataset);
+                return Err(error);
+            }
+        };
+        self.process_successful_range(chain, dataset, range, target_block, batch_started, result)
+            .await
+    }
 
-        Ok(report)
+    async fn finalized_head(&self, chain_id: u64) -> anyhow::Result<u64> {
+        self.reader
+            .finalized_head(chain_id)
+            .await
+            .with_context(|| format!("query Datalens finalized head for chain {chain_id}"))
     }
 
     async fn query_range_once(
@@ -361,6 +323,7 @@ where
         result: DatalensLogQueryResult,
     ) -> anyhow::Result<ProcessedRangeReport> {
         let Some(served_end) = result.served_end else {
+            warn_stuck_incomplete(chain.chain_id, dataset, result.incomplete_reason);
             log::info!(
                 "ORMP Datalens batch served nothing chain_id={} dataset={} from_block={} to_block={} incomplete={:?}",
                 chain.chain_id,
@@ -377,8 +340,25 @@ where
                 ..ProcessedRangeReport::default()
             });
         };
+        let served_start = result.served_start.with_context(|| {
+            format!(
+                "Datalens log query served end without start chain_id={} dataset={} from_block={} to_block={}",
+                chain.chain_id, dataset, range.from_block, range.to_block
+            )
+        })?;
+        if served_start != range.from_block {
+            anyhow::bail!(
+                "Datalens log query served start {served_start} does not match from_block {} chain_id={} dataset={} to_block={}",
+                range.from_block,
+                chain.chain_id,
+                dataset,
+                range.to_block
+            );
+        }
+        let served_end = served_end.min(range.to_block);
+        warn_stuck_incomplete(chain.chain_id, dataset, result.incomplete_reason);
         let records_read = result.logs.len();
-        let stop_poll = !result.covers(range.to_block);
+        let stop_poll = result.incomplete_reason.is_some() || served_end < range.to_block;
         let incomplete_reason = result.incomplete_reason;
         let logs = result.logs;
         let mut events = Vec::new();
@@ -486,9 +466,11 @@ where
         let Some(to_block) = checkpoint_next_block.checked_sub(1) else {
             return Ok(None);
         };
+        let finalized = self.finalized_head(chain.chain_id).await?;
         let from_block = chain
             .start_block
-            .max(checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks));
+            .max(checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks))
+            .max(finalized.saturating_add(1));
         if from_block > to_block {
             return Ok(None);
         }
@@ -582,6 +564,16 @@ where
             ));
         }
 
+        let finalized = self.finalized_head(chain.chain_id).await?;
+        let from_block = range.from_block.max(finalized.saturating_add(1));
+        if from_block > range.to_block {
+            return Ok(Vec::new());
+        }
+        let range = BlockRange {
+            from_block,
+            to_block: range.to_block,
+        };
+
         let blocks_result = self
             .reader
             .query_blocks(DatalensBlockQuery {
@@ -672,33 +664,21 @@ fn block_anchors_from_blocks(
     Ok(anchors)
 }
 
-fn can_split_datalens_query_failure(error: &anyhow::Error, range: BlockRange) -> bool {
-    if range.from_block >= range.to_block {
-        return false;
+fn warn_stuck_incomplete(chain_id: u64, dataset: &str, reason: Option<IncompleteReason>) {
+    let Some(reason) = reason else {
+        return;
+    };
+    if !matches!(
+        reason,
+        IncompleteReason::ProviderError | IncompleteReason::BudgetExhausted
+    ) {
+        return;
     }
-
-    let error = format!("{error:#}");
-    let failure_kind = classify_datalens_failure_message(&error);
-    if matches!(failure_kind, DatalensFailureKind::ProviderLimit) {
-        return true;
-    }
-
-    matches!(failure_kind, DatalensFailureKind::Transient)
-        && (error.contains("provider_failure") || error.contains("providerfailure"))
-}
-
-fn split_range(range: BlockRange) -> (BlockRange, BlockRange) {
-    let midpoint = range.from_block + (range.to_block - range.from_block) / 2;
-    (
-        BlockRange {
-            from_block: range.from_block,
-            to_block: midpoint,
-        },
-        BlockRange {
-            from_block: midpoint + 1,
-            to_block: range.to_block,
-        },
-    )
+    log::warn!(
+        "ORMP Datalens serve stalled chain_id={chain_id} dataset={dataset} incomplete={}",
+        reason.as_str()
+    );
+    crate::metrics::record_incomplete_serve(chain_id, dataset, reason.as_str());
 }
 
 fn log_query_start(chain: &ChainConfig, dataset: &str, range: BlockRange, target_block: u64) {
