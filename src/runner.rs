@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
 
@@ -14,10 +14,10 @@ use crate::{
     database::EventWriter,
     datalens::{
         DatalensBlockQuery, DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult,
-        DatalensLogReader, DatalensTransactionQuery, classify_datalens_failure_message,
+        DatalensLogReader, classify_datalens_failure_message,
     },
     decoder::EventDecoder,
-    planner::{MSGPORT_MESSAGE_SENT_TOPIC, TRON_CHAIN_ID, chain_dataset},
+    planner::chain_dataset,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -60,6 +60,7 @@ struct ProcessedRangeReport {
     records_decoded: u64,
     records_written: u64,
     checkpoints_advanced: u64,
+    stop_poll: bool,
 }
 
 trait RunReport {
@@ -228,7 +229,8 @@ where
         }
 
         let mut report = ChainRunReport::default();
-        while checkpoint.next_block <= target_block {
+        let mut stop_poll = false;
+        while checkpoint.next_block <= target_block && !stop_poll {
             let mut range = plan_next_range(&checkpoint, chain.batch_size).with_context(|| {
                 format!(
                     "plan ORMP checkpoint range chain_id={} dataset={} checkpoint_next_block={} batch_size={}",
@@ -246,6 +248,7 @@ where
             report.records_written += range_report.records_written;
             report.checkpoints_advanced += range_report.checkpoints_advanced;
             checkpoint.next_block = range_report.next_block;
+            stop_poll = range_report.stop_poll;
         }
 
         if report.ranges_queried > 0 {
@@ -315,6 +318,10 @@ where
             report.records_decoded += range_report.records_decoded;
             report.records_written += range_report.records_written;
             report.checkpoints_advanced += range_report.checkpoints_advanced;
+            report.stop_poll = range_report.stop_poll;
+            if range_report.stop_poll {
+                break;
+            }
         }
 
         Ok(report)
@@ -353,10 +360,27 @@ where
         batch_started: Instant,
         result: DatalensLogQueryResult,
     ) -> anyhow::Result<ProcessedRangeReport> {
+        let Some(served_end) = result.served_end else {
+            log::info!(
+                "ORMP Datalens batch served nothing chain_id={} dataset={} from_block={} to_block={} incomplete={:?}",
+                chain.chain_id,
+                dataset,
+                range.from_block,
+                range.to_block,
+                result.incomplete_reason
+            );
+            return Ok(ProcessedRangeReport {
+                next_block: range.from_block,
+                ranges_queried: 1,
+                records_read: result.logs.len() as u64,
+                stop_poll: true,
+                ..ProcessedRangeReport::default()
+            });
+        };
         let records_read = result.logs.len();
-        let logs = self
-            .enrich_logs_with_transaction_senders(chain, result.logs)
-            .await?;
+        let stop_poll = !result.covers(range.to_block);
+        let incomplete_reason = result.incomplete_reason;
+        let logs = result.logs;
         let mut events = Vec::new();
         for log in &logs {
             let topic0 = log
@@ -376,14 +400,18 @@ where
                 )
             })?);
         }
-        let next_block = range.to_block.checked_add(1).with_context(|| {
+        let next_block = served_end.checked_add(1).with_context(|| {
             format!(
-                "ORMP checkpoint next block overflow chain_id={} dataset={} to_block={}",
-                chain.chain_id, dataset, range.to_block
+                "ORMP checkpoint next block overflow chain_id={} dataset={} served_end={served_end}",
+                chain.chain_id, dataset
             )
         })?;
+        let served_range = BlockRange {
+            from_block: range.from_block,
+            to_block: served_end,
+        };
         let anchors = self
-            .block_anchors_for_range(chain, dataset, range, &logs)
+            .block_anchors_for_range(chain, dataset, served_range, &logs)
             .await?;
         let written = self
             .writer
@@ -398,12 +426,17 @@ where
             .await
             .with_context(|| {
                 format!(
-                    "write ORMP events chain_id={} dataset={} from_block={} to_block={} next_block={}",
-                    chain.chain_id, dataset, range.from_block, range.to_block, next_block
+                    "write ORMP events chain_id={} dataset={} from_block={} served_end={served_end} next_block={next_block}",
+                    chain.chain_id, dataset, range.from_block
                 )
             })?;
 
-        let progress = batch_progress(range, target_block, next_block, batch_started.elapsed());
+        let progress = batch_progress(
+            served_range,
+            target_block,
+            next_block,
+            batch_started.elapsed(),
+        );
         crate::metrics::record_range_success(crate::metrics::RangeSuccessMetrics {
             chain_id: chain.chain_id,
             dataset,
@@ -415,7 +448,7 @@ where
             duration_seconds: batch_started.elapsed().as_secs_f64(),
         });
         log::info!(
-            "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true batch_blocks={} remaining_blocks={} batch_duration_ms={} current_rate_blocks_per_second={:.2} eta_seconds={}",
+            "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} served_end={served_end} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true stop_poll={stop_poll} incomplete={:?} batch_blocks={} remaining_blocks={} batch_duration_ms={} current_rate_blocks_per_second={:.2} eta_seconds={}",
             chain.chain_id,
             dataset,
             range.from_block,
@@ -425,6 +458,7 @@ where
             events.len(),
             written,
             next_block,
+            incomplete_reason,
             progress.batch_blocks,
             progress.remaining_blocks,
             progress.batch_duration_ms,
@@ -439,75 +473,8 @@ where
             records_decoded: events.len() as u64,
             records_written: written as u64,
             checkpoints_advanced: 1,
+            stop_poll,
         })
-    }
-
-    async fn enrich_logs_with_transaction_senders(
-        &self,
-        chain: &ChainConfig,
-        mut logs: Vec<crate::datalens::DatalensLog>,
-    ) -> anyhow::Result<Vec<crate::datalens::DatalensLog>> {
-        if chain.chain_id == TRON_CHAIN_ID || logs.iter().all(|log| log.transaction_from.is_some())
-        {
-            return Ok(logs);
-        }
-
-        let sender_blocks =
-            logs.iter()
-                .filter(|log| {
-                    log.transaction_from.is_none()
-                        && log.topics.first().is_some_and(|topic| {
-                            topic.eq_ignore_ascii_case(MSGPORT_MESSAGE_SENT_TOPIC)
-                        })
-                })
-                .map(|log| log.block_number)
-                .collect::<BTreeSet<_>>();
-        if sender_blocks.is_empty() {
-            return Ok(logs);
-        }
-
-        let mut transactions = Vec::new();
-        for block_number in sender_blocks {
-            let result = self
-                .reader
-                .query_transactions(DatalensTransactionQuery {
-                    chain_id: chain.chain_id,
-                    from_block: block_number,
-                    to_block: block_number,
-                    finality_mode: chain.finality_mode,
-                })
-                .await;
-            crate::metrics::record_datalens_request(
-                chain.chain_id,
-                chain_dataset(chain.chain_id).unwrap_or("unknown"),
-                "transactions",
-                result.is_ok(),
-            );
-            transactions.extend(
-                result
-                    .with_context(|| {
-                        format!(
-                            "query ORMP Datalens transactions chain_id={} block_number={}",
-                            chain.chain_id, block_number
-                        )
-                    })?
-                    .transactions,
-            );
-        }
-        let senders = transactions
-            .into_iter()
-            .map(|transaction| (sender_hash_key(&transaction.hash), transaction.from))
-            .collect::<HashMap<_, _>>();
-
-        for log in &mut logs {
-            if log.transaction_from.is_none() {
-                log.transaction_from = senders
-                    .get(&sender_hash_key(&log.transaction_hash))
-                    .cloned();
-            }
-        }
-
-        Ok(logs)
     }
 
     async fn rollback_reorged_anchors(
@@ -645,15 +612,6 @@ where
             blocks.blocks,
         )
     }
-}
-
-fn sender_hash_key(hash: &str) -> String {
-    let hash = hash.trim();
-    let hash = hash
-        .strip_prefix("0x")
-        .or_else(|| hash.strip_prefix("0X"))
-        .unwrap_or(hash);
-    format!("0x{}", hash.to_ascii_lowercase())
 }
 
 fn block_anchors_from_logs(

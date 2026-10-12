@@ -4,9 +4,7 @@ use ormpindexer::{
     config::{FinalityMode, RuntimeConfig},
     planner::{
         PRODUCTION_EVM_CHAIN_IDS, SIGNATURE_PUB_ADDRESS, SIGNATURE_PUB_SIGNATURE_SUBMITTION_TOPIC,
-        TRON_CHAIN_ID, TRON_MESSAGE_ACCEPTED_EVENT, TRON_MESSAGE_DISPATCHED_EVENT,
-        TRON_MSGPORT_ADDRESS, TRON_ORMP_ADDRESS, default_chain_config, default_evm_chain_config,
-        default_tron_chain_config, plan_evm_log_queries, plan_tron_event_queries,
+        chain_dataset, default_chain_config, default_evm_chain_config, plan_evm_log_queries,
     },
 };
 
@@ -83,69 +81,11 @@ fn test_plan_evm_log_queries_splits_ranges_by_limit() {
 }
 
 #[test]
-fn test_tron_chain_default_config_and_query_plans_are_available() {
-    let chain = default_tron_chain_config().expect("tron mainnet");
-    let plans = plan_tron_event_queries(
-        "ignored",
-        &chain,
-        chain.start_block,
-        chain.start_block + 9,
-        100,
-        FinalityMode::Finalized,
-    )
-    .expect("tron query plans");
-
-    assert_eq!(chain.chain_id, TRON_CHAIN_ID);
-    assert_eq!(
-        TRON_ORMP_ADDRESS,
-        "415c5c383febe62f377f8c0ea1de97f2a2ba102e98"
-    );
-    assert_eq!(
-        TRON_MSGPORT_ADDRESS,
-        "413bc5362ec3a3dbc07292aed4ef18be18de02da3a"
-    );
-    assert!(chain.contracts.contains(&TRON_ORMP_ADDRESS.to_owned()));
-    assert!(chain.contracts.contains(&TRON_MSGPORT_ADDRESS.to_owned()));
-    assert!(
-        chain
-            .topics
-            .contains(&TRON_MESSAGE_ACCEPTED_EVENT.to_owned())
-    );
-    assert!(
-        chain
-            .topics
-            .contains(&TRON_MESSAGE_DISPATCHED_EVENT.to_owned())
-    );
-    assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].dataset, "tron.events");
-    assert_eq!(plans[0].query.chain_id, TRON_CHAIN_ID);
-    assert_eq!(plans[0].query.from_block, chain.start_block);
-    assert_eq!(plans[0].query.to_block, chain.start_block + 9);
-    assert_eq!(plans[0].query.contracts, chain.contracts);
-    assert_eq!(plans[0].query.topics, chain.topics);
-}
-
-#[test]
-fn test_runtime_config_accepts_tron_chain_defaults() {
-    let env = BTreeMap::from([
-        (
-            "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
-            TRON_CHAIN_ID.to_string(),
-        ),
-        (
-            format!("ORMPINDEXER_CHAIN_{TRON_CHAIN_ID}_START_BLOCK"),
-            "83200000".to_owned(),
-        ),
-    ]);
-    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
-    let tron = config.chain(TRON_CHAIN_ID).expect("tron chain");
-
-    assert_eq!(tron.chain_id, TRON_CHAIN_ID);
-    assert!(!tron.contracts.is_empty());
-    assert!(
-        tron.topics
-            .contains(&TRON_MESSAGE_ACCEPTED_EVENT.to_owned())
-    );
+fn test_chain_dataset_is_evm_logs_for_configured_chains() {
+    assert_eq!(chain_dataset(1).expect("ethereum"), "evm.logs");
+    assert_eq!(chain_dataset(42161).expect("arbitrum"), "evm.logs");
+    let error = chain_dataset(728_126_428).expect_err("removed chain id is unconfigured");
+    assert!(error.to_string().contains("unconfigured ORMP EVM chain"));
 }
 
 #[test]
@@ -171,41 +111,6 @@ fn test_runtime_config_accepts_safe_finality_with_reorg_window() {
         FinalityMode::Safe
     );
     assert_eq!(config.reorg_window_blocks, 128);
-}
-
-#[test]
-fn test_runtime_config_requires_tron_start_block() {
-    let env = BTreeMap::from([(
-        "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
-        TRON_CHAIN_ID.to_string(),
-    )]);
-
-    let error = RuntimeConfig::from_env_map(&env).expect_err("missing Tron start block fails");
-
-    assert!(
-        error
-            .to_string()
-            .contains("ORMPINDEXER_CHAIN_728126428_START_BLOCK must be configured for Tron")
-    );
-}
-
-#[test]
-fn test_runtime_config_does_not_use_global_start_block_for_tron() {
-    let env = BTreeMap::from([
-        (
-            "ORMPINDEXER_ENABLED_CHAINS".to_owned(),
-            TRON_CHAIN_ID.to_string(),
-        ),
-        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
-    ]);
-
-    let error = RuntimeConfig::from_env_map(&env).expect_err("global start block is ignored");
-
-    assert!(
-        error
-            .to_string()
-            .contains("ORMPINDEXER_CHAIN_728126428_START_BLOCK must be configured for Tron")
-    );
 }
 
 #[test]

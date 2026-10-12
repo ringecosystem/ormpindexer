@@ -7,9 +7,8 @@ use ormpindexer::{
     checkpoint::{BlockAnchor, CheckpointStore, InMemoryCheckpointStore},
     config::{FinalityMode, RuntimeConfig},
     database::DryRunEventWriter,
-    datalens::{DatalensBlock, DatalensLog, DatalensTransaction, DatalensTransactionQuery},
+    datalens::{DatalensBlock, DatalensLog, IncompleteReason},
     decoder::NoopDecoder,
-    planner::MSGPORT_MESSAGE_SENT_TOPIC,
     runner::{IndexerRunner, RunnerReport},
     schema::LegacyOrmPEvent,
 };
@@ -88,7 +87,7 @@ async fn test_runner_successful_batch_advances_checkpoint_to_next_range() {
 }
 
 #[tokio::test]
-async fn test_runner_enriches_evm_logs_with_transaction_senders() {
+async fn test_runner_keeps_transaction_from_supplied_on_the_log_row() {
     let env = BTreeMap::from([
         (
             "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
@@ -103,7 +102,6 @@ async fn test_runner_enriches_evm_logs_with_transaction_senders() {
         ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
     ]);
     let config = RuntimeConfig::from_env_map(&env).expect("config parses");
-    let tx_hash = format!("0x{}", "aa".repeat(32));
     let reader = RecordingDatalensReader::new(vec![DatalensLog {
         id: Some("46-12-0".to_owned()),
         chain_id: 46,
@@ -111,30 +109,26 @@ async fn test_runner_enriches_evm_logs_with_transaction_senders() {
         block_hash: None,
         parent_hash: None,
         block_timestamp: Some(1_700_000_000_000),
-        transaction_hash: tx_hash.trim_start_matches("0x").to_ascii_uppercase(),
+        transaction_hash: format!("0x{}", "aa".repeat(32)),
         transaction_index: Some(0),
         log_index: 1,
         address: "0x333".to_owned(),
-        transaction_from: None,
-        topics: vec![MSGPORT_MESSAGE_SENT_TOPIC.to_owned()],
+        transaction_from: Some("0xsender".to_owned()),
+        topics: vec!["0xaaa".to_owned()],
         data: "0x".to_owned(),
         event_name: None,
         event_signature: None,
         indexed_fields: Vec::new(),
         non_indexed_fields: None,
     }])
-    .with_head(46, 15)
-    .with_transactions(vec![DatalensTransaction {
-        hash: tx_hash,
-        block_number: 12,
-        from: "0xsender".to_owned(),
-    }]);
-    let tx_queries = reader.transaction_queries();
+    .with_head(46, 15);
+    let queries = reader.queries.clone();
     let writer = RecordingEventWriter::default();
+    let checkpoints = InMemoryCheckpointStore::default();
     let runner = IndexerRunner::new(
         config,
         reader,
-        InMemoryCheckpointStore::default(),
+        checkpoints.clone(),
         EchoTransactionFromDecoder,
         writer.clone(),
     );
@@ -149,18 +143,65 @@ async fn test_runner_enriches_evm_logs_with_transaction_senders() {
         }
         _ => panic!("expected MsgportMessageSent event"),
     }
-    assert_eq!(
-        tx_queries
-            .lock()
-            .expect("transaction queries lock")
-            .as_slice(),
-        &[DatalensTransactionQuery {
-            chain_id: 46,
-            from_block: 12,
-            to_block: 12,
-            finality_mode: FinalityMode::Finalized,
-        }]
+    assert_eq!(queries.lock().expect("queries lock").len(), 1);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 15);
+}
+
+#[tokio::test]
+async fn test_runner_stops_checkpoint_at_served_end_when_the_range_is_incomplete() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "5".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "10".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let reader = RecordingDatalensReader::new(vec![DatalensLog {
+        id: Some("46-11-0".to_owned()),
+        chain_id: 46,
+        block_number: 11,
+        block_hash: Some("0xblock".to_owned()),
+        parent_hash: None,
+        block_timestamp: Some(1_700_000_000_000),
+        transaction_hash: "0xtx".to_owned(),
+        transaction_index: Some(0),
+        log_index: 1,
+        address: "0x333".to_owned(),
+        transaction_from: Some("0xsender".to_owned()),
+        topics: vec!["0xaaa".to_owned()],
+        data: "0x".to_owned(),
+        event_name: None,
+        event_signature: None,
+        indexed_fields: Vec::new(),
+        non_indexed_fields: None,
+    }])
+    .with_head(46, 15)
+    .with_partial(46, 10, 14, Some(11), IncompleteReason::NotFollowedYet);
+    let queries = reader.queries.clone();
+    let checkpoints = InMemoryCheckpointStore::default();
+    let runner = IndexerRunner::new(
+        config,
+        reader,
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
     );
+
+    let report = runner.run_once().await.expect("partial batch succeeds");
+
+    assert_eq!(report.ranges_queried, 1);
+    assert_eq!(report.checkpoints_advanced, 1);
+    assert_eq!(queries.lock().expect("queries lock").len(), 1);
+    assert_eq!(queries.lock().expect("queries lock")[0].from_block, 10);
+    assert_eq!(queries.lock().expect("queries lock")[0].to_block, 14);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 12);
 }
 
 #[tokio::test]
@@ -904,7 +945,7 @@ async fn test_runner_writer_failure_does_not_advance_checkpoint() {
     let error_chain = format!("{error:#}");
     assert!(
         error_chain
-            .contains("write ORMP events chain_id=46 dataset=evm.logs from_block=10 to_block=14")
+            .contains("write ORMP events chain_id=46 dataset=evm.logs from_block=10 served_end=14")
     );
     assert!(error_chain.contains("write failed"));
     assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 10);

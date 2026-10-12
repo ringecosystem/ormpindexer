@@ -40,8 +40,6 @@ pub struct RuntimeMetricsRow {
     pub datalens_log_requests_failure_total: u64,
     pub datalens_block_requests_success_total: u64,
     pub datalens_block_requests_failure_total: u64,
-    pub datalens_tx_requests_success_total: u64,
-    pub datalens_tx_requests_failure_total: u64,
     pub reorg_rollbacks_total: u64,
 }
 
@@ -182,14 +180,6 @@ pub fn record_datalens_request(chain_id: u64, dataset: &str, operation: &str, su
         ("blocks", false) => {
             row.datalens_block_requests_failure_total =
                 row.datalens_block_requests_failure_total.saturating_add(1)
-        }
-        ("transactions", true) => {
-            row.datalens_tx_requests_success_total =
-                row.datalens_tx_requests_success_total.saturating_add(1)
-        }
-        ("transactions", false) => {
-            row.datalens_tx_requests_failure_total =
-                row.datalens_tx_requests_failure_total.saturating_add(1)
         }
         _ => {}
     }

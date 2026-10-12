@@ -684,11 +684,6 @@ fn append_datalens_request_metrics(body: &mut String, row: &crate::metrics::Runt
             row.datalens_block_requests_success_total,
             row.datalens_block_requests_failure_total,
         ),
-        (
-            "transactions",
-            row.datalens_tx_requests_success_total,
-            row.datalens_tx_requests_failure_total,
-        ),
     ] {
         append_metric(
             body,

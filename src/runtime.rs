@@ -7,7 +7,6 @@ use crate::{
     decoder::EvmEventDecoder,
     graphql::{build_router_with_metrics_config, build_schema},
     runner::IndexerRunner,
-    warmup::ensure_startup_warmup,
 };
 
 pub async fn run(run_once: bool) -> anyhow::Result<()> {
@@ -33,7 +32,6 @@ pub async fn run(run_once: bool) -> anyhow::Result<()> {
 
     let client = DatalensHttpClient::new(config.datalens.clone());
     let checkpoints = PostgresCheckpointStore::new(pool.clone());
-    ensure_datalens_warmup_on_startup(&config, &checkpoints, &client).await?;
 
     let runner = IndexerRunner::new(
         config.clone(),
@@ -76,7 +74,6 @@ pub async fn run_with_server(listen_addr: &str) -> anyhow::Result<()> {
 
     let client = DatalensHttpClient::new(config.datalens.clone());
     let checkpoints = PostgresCheckpointStore::new(pool.clone());
-    ensure_datalens_warmup_on_startup(&config, &checkpoints, &client).await?;
 
     let runner = IndexerRunner::new(
         config.clone(),
@@ -97,15 +94,6 @@ pub async fn run_with_server(listen_addr: &str) -> anyhow::Result<()> {
             .context("serve GraphQL server")
     },)?;
 
-    Ok(())
-}
-
-async fn ensure_datalens_warmup_on_startup(
-    config: &RuntimeConfig,
-    checkpoints: &PostgresCheckpointStore,
-    client: &DatalensHttpClient,
-) -> anyhow::Result<()> {
-    ensure_startup_warmup(config, checkpoints, client).await?;
     Ok(())
 }
 

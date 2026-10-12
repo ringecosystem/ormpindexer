@@ -386,9 +386,9 @@ fn test_msgport_sent_and_recv_preserve_event_metadata() {
         transaction_from: Some("0xsender".to_owned()),
     };
     let recv_metadata = ChainLogMetadata {
-        id: "728126428-9989983-trontx6b95f-4".to_owned(),
-        source: EventSource::Tron,
-        chain_id: 728_126_428,
+        id: "137-9989983-0x6b95f-4".to_owned(),
+        source: EventSource::Evm,
+        chain_id: 137,
         block_number: 9_989_983,
         block_hash: Some(
             "0x6b95f000000000000000000000000000000000000000000000000000000000000".to_owned(),
@@ -398,14 +398,14 @@ fn test_msgport_sent_and_recv_preserve_event_metadata() {
             .to_owned(),
         transaction_index: 9,
         log_index: 4,
-        contract_address: "0xtronport".to_owned(),
+        contract_address: "0xport".to_owned(),
         transaction_from: None,
     };
     let sent = MsgportMessageSentRow::from_event(LegacyOrmPEvent::MsgportMessageSent {
         metadata: sent_metadata,
         msg_id: "0xmsgid".to_owned(),
         from_dapp: "0xfromdapp".to_owned(),
-        to_chain_id: 728_126_428,
+        to_chain_id: 137,
         to_dapp: "0xtodapp".to_owned(),
         message: "0xmessage".to_owned(),
         params: "0xparams".to_owned(),
@@ -426,7 +426,7 @@ fn test_msgport_sent_and_recv_preserve_event_metadata() {
     assert_eq!(recv.id, "0009989983-6b95f-000004");
     assert_eq!(recv.transaction_index, 9);
     assert_eq!(recv.log_index, 4);
-    assert_eq!(recv.port_address, "0xtronport");
+    assert_eq!(recv.port_address, "0xport");
 }
 
 #[test]
@@ -505,11 +505,10 @@ fn test_schema_contract_lists_legacy_tables_and_metadata_gaps() {
             .contains("CREATE TABLE IF NOT EXISTS ormp_message_accepted")
     );
     assert_eq!(
-        EventSource::Tron
-            .transaction_from_source()
-            .expect("tron source is documented"),
-        "transaction.internalTransactions[logIndex].callerAddress"
+        EventSource::Evm.transaction_from_source(),
+        Some("transaction.from")
     );
+    assert_eq!(EventSource::Evm.event_index_source(), "log.logIndex");
 }
 
 fn evm_metadata(id: &str) -> ChainLogMetadata {
