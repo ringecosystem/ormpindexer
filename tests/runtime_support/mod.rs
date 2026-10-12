@@ -34,6 +34,7 @@ pub struct RecordingDatalensReader {
     query_delays: BTreeMap<u64, Duration>,
     query_failures: BTreeMap<u64, String>,
     partials: Vec<PartialLogServe>,
+    block_incomplete: Option<IncompleteReason>,
     pub queries: Arc<Mutex<Vec<DatalensLogQuery>>>,
     block_queries: Arc<Mutex<Vec<DatalensBlockQuery>>>,
 }
@@ -48,6 +49,7 @@ impl RecordingDatalensReader {
             query_delays: BTreeMap::new(),
             query_failures: BTreeMap::new(),
             partials: Vec::new(),
+            block_incomplete: None,
             queries: Arc::new(Mutex::new(Vec::new())),
             block_queries: Arc::new(Mutex::new(Vec::new())),
         }
@@ -103,6 +105,11 @@ impl RecordingDatalensReader {
 
     pub fn with_blocks(mut self, blocks: Vec<DatalensBlock>) -> Self {
         self.blocks = blocks;
+        self
+    }
+
+    pub fn with_block_incomplete(mut self, reason: IncompleteReason) -> Self {
+        self.block_incomplete = Some(reason);
         self
     }
 
@@ -194,6 +201,14 @@ impl DatalensLogReader for RecordingDatalensReader {
             .lock()
             .expect("block queries lock")
             .push(query.clone());
+        if let Some(reason) = self.block_incomplete {
+            return Ok(DatalensBlockQueryResult {
+                blocks: Vec::new(),
+                served_start: None,
+                served_end: None,
+                incomplete_reason: Some(reason),
+            });
+        }
         Ok(DatalensBlockQueryResult {
             blocks: self
                 .blocks
@@ -205,6 +220,9 @@ impl DatalensLogReader for RecordingDatalensReader {
                 })
                 .cloned()
                 .collect(),
+            served_start: Some(query.from_block),
+            served_end: Some(query.to_block),
+            incomplete_reason: None,
         })
     }
 }

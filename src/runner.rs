@@ -390,9 +390,18 @@ where
             from_block: range.from_block,
             to_block: served_end,
         };
-        let anchors = self
+        let Some(anchors) = self
             .block_anchors_for_range(chain, dataset, served_range, &logs)
-            .await?;
+            .await?
+        else {
+            return Ok(ProcessedRangeReport {
+                next_block: range.from_block,
+                ranges_queried: 1,
+                records_read: logs.len() as u64,
+                stop_poll: true,
+                ..ProcessedRangeReport::default()
+            });
+        };
         let written = self
             .writer
             .write_events_and_advance_checkpoint(
@@ -509,6 +518,15 @@ where
                     chain.chain_id, dataset, from_block, to_block
                 )
             })?;
+        if !current_blocks.covers(from_block, to_block) {
+            warn_stuck_incomplete(chain.chain_id, dataset, current_blocks.incomplete_reason);
+            log::info!(
+                "ORMP Datalens reorg check waiting chain_id={} dataset={dataset} from_block={from_block} to_block={to_block} incomplete={:?}",
+                chain.chain_id,
+                current_blocks.incomplete_reason
+            );
+            return Ok(None);
+        }
         let current_blocks = current_blocks
             .blocks
             .into_iter()
@@ -554,20 +572,20 @@ where
         dataset: &str,
         range: BlockRange,
         logs: &[crate::datalens::DatalensLog],
-    ) -> anyhow::Result<Vec<BlockAnchor>> {
+    ) -> anyhow::Result<Option<Vec<BlockAnchor>>> {
         if !chain.finality_mode.uses_reorg_protection() {
-            return Ok(block_anchors_from_logs(
+            return Ok(Some(block_anchors_from_logs(
                 chain.chain_id,
                 dataset,
                 chain.finality_mode,
                 logs,
-            ));
+            )));
         }
 
         let finalized = self.finalized_head(chain.chain_id).await?;
         let from_block = range.from_block.max(finalized.saturating_add(1));
         if from_block > range.to_block {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let range = BlockRange {
             from_block,
@@ -595,6 +613,17 @@ where
                     chain.chain_id, dataset, range.from_block, range.to_block
                 )
             })?;
+        if !blocks.covers(range.from_block, range.to_block) {
+            warn_stuck_incomplete(chain.chain_id, dataset, blocks.incomplete_reason);
+            log::info!(
+                "ORMP Datalens block anchors waiting chain_id={} dataset={dataset} from_block={} to_block={} incomplete={:?}",
+                chain.chain_id,
+                range.from_block,
+                range.to_block,
+                blocks.incomplete_reason
+            );
+            return Ok(None);
+        }
 
         block_anchors_from_blocks(
             chain.chain_id,
@@ -603,6 +632,7 @@ where
             range,
             blocks.blocks,
         )
+        .map(Some)
     }
 }
 

@@ -50,6 +50,17 @@ pub struct DatalensBlock {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensBlockQueryResult {
     pub blocks: Vec<DatalensBlock>,
+    pub served_start: Option<u64>,
+    pub served_end: Option<u64>,
+    pub incomplete_reason: Option<IncompleteReason>,
+}
+
+impl DatalensBlockQueryResult {
+    pub fn covers(&self, from_block: u64, to_block: u64) -> bool {
+        self.incomplete_reason.is_none()
+            && self.served_start.is_some_and(|start| start <= from_block)
+            && self.served_end.is_some_and(|end| end >= to_block)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

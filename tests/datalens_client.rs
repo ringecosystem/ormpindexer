@@ -481,7 +481,7 @@ async fn test_client_posts_block_anchor_query_without_a_selector() {
 }
 
 #[tokio::test]
-async fn test_client_refuses_an_incomplete_block_query() {
+async fn test_client_returns_an_incomplete_block_query() {
     let mock = Mock::new(vec![ok(json!({
         "chain": "arbitrum",
         "dataset": "evm.blocks",
@@ -496,7 +496,7 @@ async fn test_client_refuses_an_incomplete_block_query() {
     let endpoint = serve(mock.clone()).await;
     let client = DatalensHttpClient::new(config(&endpoint, 3));
 
-    let error = client
+    let blocks = client
         .query_blocks(DatalensBlockQuery {
             chain_id: 42161,
             from_block: 20,
@@ -504,9 +504,13 @@ async fn test_client_refuses_an_incomplete_block_query() {
             finality_mode: FinalityMode::Latest,
         })
         .await
-        .expect_err("incomplete blocks fail");
+        .expect("incomplete blocks are returned");
 
-    assert!(error.to_string().contains("not_followed_yet"));
+    assert_eq!(
+        blocks.incomplete_reason,
+        Some(IncompleteReason::NotFollowedYet)
+    );
+    assert!(!blocks.covers(20, 21));
     assert_eq!(mock.calls()[0].1["finality"], json!("safe_to_latest"));
     assert_eq!(mock.calls().len(), 1);
 }

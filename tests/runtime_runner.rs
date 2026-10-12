@@ -1196,6 +1196,42 @@ async fn test_runner_does_not_query_blocks_when_the_served_range_is_finalized() 
     );
 }
 
+#[tokio::test]
+async fn test_runner_waits_when_latest_block_anchors_are_not_followed() {
+    let env = BTreeMap::from([
+        (
+            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
+            "https://datalens.example".to_owned(),
+        ),
+        (
+            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
+            "ormp-production".to_owned(),
+        ),
+        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
+        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "20".to_owned()),
+        ("ORMPINDEXER_START_BLOCK".to_owned(), "25".to_owned()),
+        ("ORMPINDEXER_FINALITY_MODE".to_owned(), "latest".to_owned()),
+    ]);
+    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
+    let reader = RecordingDatalensReader::new(Vec::new())
+        .with_head(46, 30)
+        .with_finalized_head(46, 20)
+        .with_block_incomplete(IncompleteReason::NotFollowedYet);
+    let checkpoints = InMemoryCheckpointStore::default();
+    let runner = IndexerRunner::new(
+        config,
+        reader,
+        checkpoints.clone(),
+        NoopDecoder,
+        DryRunEventWriter,
+    );
+
+    let report = runner.run_once().await.expect("waiting is not a failure");
+
+    assert_eq!(report.checkpoints_advanced, 0);
+    assert_eq!(checkpoints.next_block(46, "evm.logs").await.unwrap(), 25);
+}
+
 fn incomplete_serves(chain_id: u64, reason: &str) -> u64 {
     ormpindexer::metrics::snapshot()
         .runtime_rows

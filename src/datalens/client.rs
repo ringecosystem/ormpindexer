@@ -19,7 +19,7 @@ use crate::{
         retry::{datalens_retry_delay, is_retryable_http_status, retry_after_header},
         types::{
             DatalensBlockQuery, DatalensBlockQueryResult, DatalensLogQuery, DatalensLogQueryResult,
-            DatalensLogReader, IncompleteReason,
+            DatalensLogReader,
         },
     },
 };
@@ -295,24 +295,12 @@ impl DatalensLogReader for DatalensHttpClient {
     ) -> anyhow::Result<DatalensBlockQueryResult> {
         let request = block_query_body(&query)?;
         let page = self.post_query(&request).await?;
-        let served_end = page.served_end;
-        let covers = page.incomplete_reason.is_none()
-            && page
-                .served_start
-                .is_some_and(|start| start <= query.from_block)
-            && served_end.is_some_and(|end| end >= query.to_block);
-        if !covers {
-            anyhow::bail!(
-                "Datalens block query incomplete chain_id={} from_block={} to_block={} served_end={served_end:?} reason={}",
-                query.chain_id,
-                query.from_block,
-                query.to_block,
-                page.incomplete_reason
-                    .map(IncompleteReason::as_str)
-                    .unwrap_or("none")
-            );
-        }
         let blocks = blocks_from_page(&page, query.chain_id)?;
-        Ok(DatalensBlockQueryResult { blocks })
+        Ok(DatalensBlockQueryResult {
+            blocks,
+            served_start: page.served_start,
+            served_end: page.served_end,
+            incomplete_reason: page.incomplete_reason,
+        })
     }
 }
