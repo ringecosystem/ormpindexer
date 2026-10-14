@@ -1,7 +1,7 @@
 use sqlx::{PgPool, Row};
 
 use ormpindexer::{
-    planner::{MSGPORT_ADDRESS, TRON_CHAIN_ID},
+    planner::MSGPORT_ADDRESS,
     schema::{
         AssignmentConfig, LegacyOrmPEvent, MsgportMessageRecvRow, MsgportMessageSentRow,
         OrmpHashImportedRow, OrmpMessageAcceptedRow, OrmpMessageAssignedRow,
@@ -175,91 +175,8 @@ pub fn evm_expected_rows() -> Vec<CompatibilityRow> {
     rows
 }
 
-pub fn tron_expected_rows() -> Vec<CompatibilityRow> {
-    let msg_hash = bytes_hex(0x55);
-    let hash = bytes_hex(0x66);
-    let dispatch_hash = bytes_hex(0x77);
-
-    let mut rows = vec![
-        CompatibilityRow::OrmpHashImported(OrmpHashImportedRow {
-            id: hash.clone(),
-            block_number: 120,
-            transaction_hash: "tron-hash-imported".to_owned(),
-            block_timestamp: 456_000,
-            chain_id: TRON_CHAIN_ID.into(),
-            src_chain_id: 46,
-            target_chain_id: TRON_CHAIN_ID.into(),
-            oracle: "41aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            channel: "41bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            msg_index: 7,
-            hash,
-        }),
-        CompatibilityRow::OrmpMessageAccepted(OrmpMessageAcceptedRow {
-            id: msg_hash.clone(),
-            block_number: 121,
-            transaction_hash: "tron-message-accepted".to_owned(),
-            block_timestamp: 456_001,
-            chain_id: TRON_CHAIN_ID.into(),
-            log_index: 4,
-            msg_hash: msg_hash.clone(),
-            channel: "41cccccccccccccccccccccccccccccccccccccccc".to_owned(),
-            index: 8,
-            from_chain_id: 46,
-            from: "41dddddddddddddddddddddddddddddddddddddddd".to_owned(),
-            to_chain_id: 137,
-            to: "41eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
-            gas_limit: 500_000,
-            encoded: "0xabcd".to_owned(),
-            oracle: Some(ormpindexer::schema::ADDRESS_ORACLE[0].to_owned()),
-            oracle_assigned: Some(true),
-            oracle_assigned_fee: Some(9),
-            relayer: Some(ormpindexer::schema::ADDRESS_RELAYER[0].to_owned()),
-            relayer_assigned: Some(true),
-            relayer_assigned_fee: Some(10),
-        }),
-        CompatibilityRow::OrmpMessageAssigned(OrmpMessageAssignedRow {
-            id: "728126428-122-tron-message-assigned-5".to_owned(),
-            block_number: 122,
-            transaction_hash: "tron-message-assigned".to_owned(),
-            block_timestamp: 456_002,
-            chain_id: TRON_CHAIN_ID.into(),
-            msg_hash,
-            oracle: ormpindexer::schema::ADDRESS_ORACLE[0].to_owned(),
-            relayer: ormpindexer::schema::ADDRESS_RELAYER[0].to_owned(),
-            oracle_fee: 9,
-            relayer_fee: 10,
-            params: "0x0102".to_owned(),
-        }),
-        CompatibilityRow::OrmpMessageDispatched(OrmpMessageDispatchedRow {
-            id: dispatch_hash.clone(),
-            block_number: 123,
-            transaction_hash: "tron-message-dispatched".to_owned(),
-            block_timestamp: 456_003,
-            chain_id: TRON_CHAIN_ID.into(),
-            target_chain_id: TRON_CHAIN_ID.into(),
-            msg_hash: dispatch_hash,
-            dispatch_result: true,
-        }),
-        CompatibilityRow::SignatureSubmittion(SignaturePubSignatureSubmittionRow {
-            id: "0000000126-tron--000009".to_owned(),
-            block_number: 126,
-            transaction_hash: "tron-signature-submittion".to_owned(),
-            block_timestamp: 456_006,
-            chain_id: 46,
-            channel: "41ffffffffffffffffffffffffffffffffffffffff".to_owned(),
-            signer: "411111111111111111111111111111111111111111".to_owned(),
-            msg_index: 12,
-            signature: "0xdead".to_owned(),
-            data: "0xbeef".to_owned(),
-        }),
-    ];
-    sort_rows(&mut rows);
-    rows
-}
-
 pub fn legacy_expected_rows() -> Vec<CompatibilityRow> {
     let mut rows = evm_expected_rows();
-    rows.extend(tron_expected_rows());
     sort_rows(&mut rows);
     rows
 }

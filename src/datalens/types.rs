@@ -2,6 +2,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::FinalityMode;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    Pending,
+    ProviderError,
+    BudgetExhausted,
+    NotFollowedYet,
+}
+
+impl IncompleteReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::ProviderError => "provider_error",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::NotFollowedYet => "not_followed_yet",
+        }
+    }
+
+    pub(crate) fn retries_immediately(self) -> bool {
+        matches!(self, Self::Pending | Self::ProviderError)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensBlockQuery {
     pub chain_id: u64,
@@ -26,6 +50,17 @@ pub struct DatalensBlock {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensBlockQueryResult {
     pub blocks: Vec<DatalensBlock>,
+    pub served_start: Option<u64>,
+    pub served_end: Option<u64>,
+    pub incomplete_reason: Option<IncompleteReason>,
+}
+
+impl DatalensBlockQueryResult {
+    pub fn covers(&self, from_block: u64, to_block: u64) -> bool {
+        self.incomplete_reason.is_none()
+            && self.served_start.is_some_and(|start| start <= from_block)
+            && self.served_end.is_some_and(|end| end >= to_block)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,38 +110,32 @@ pub struct DatalensLog {
     pub non_indexed_fields: Option<serde_json::Value>,
 }
 
+/// Logs inside the contiguous served prefix, plus why the request stopped.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatalensLogQueryResult {
     pub logs: Vec<DatalensLog>,
+    /// Inclusive start of `served`. `None` when the server served nothing.
+    pub served_start: Option<u64>,
+    /// Inclusive end of the served prefix. `None` means the server served nothing.
+    pub served_end: Option<u64>,
+    pub incomplete_reason: Option<IncompleteReason>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DatalensTransactionQuery {
-    pub chain_id: u64,
-    pub from_block: u64,
-    pub to_block: u64,
-    pub finality_mode: FinalityMode,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-pub struct DatalensTransaction {
-    #[serde(alias = "transaction_hash")]
-    pub hash: String,
-    #[serde(alias = "blockNumber")]
-    pub block_number: u64,
-    #[serde(alias = "transaction_from")]
-    pub from: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DatalensTransactionQueryResult {
-    pub transactions: Vec<DatalensTransaction>,
+impl DatalensLogQueryResult {
+    pub fn covers(&self, to_block: u64) -> bool {
+        self.incomplete_reason.is_none() && self.served_end.is_some_and(|end| end >= to_block)
+    }
 }
 
 #[allow(async_fn_in_trait)]
 pub trait DatalensLogReader {
     async fn latest_block(&self, chain_id: u64, finality_mode: FinalityMode)
     -> anyhow::Result<u64>;
+
+    async fn finalized_head(&self, chain_id: u64) -> anyhow::Result<u64> {
+        let _ = chain_id;
+        Ok(0)
+    }
 
     async fn query_blocks(
         &self,
@@ -116,13 +145,4 @@ pub trait DatalensLogReader {
     }
 
     async fn query_logs(&self, query: DatalensLogQuery) -> anyhow::Result<DatalensLogQueryResult>;
-
-    async fn query_transactions(
-        &self,
-        _query: DatalensTransactionQuery,
-    ) -> anyhow::Result<DatalensTransactionQueryResult> {
-        Ok(DatalensTransactionQueryResult {
-            transactions: Vec::new(),
-        })
-    }
 }

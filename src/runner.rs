@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
 
@@ -13,11 +13,11 @@ use crate::{
     config::{ChainConfig, RuntimeConfig},
     database::EventWriter,
     datalens::{
-        DatalensBlockQuery, DatalensFailureKind, DatalensLogQuery, DatalensLogQueryResult,
-        DatalensLogReader, DatalensTransactionQuery, classify_datalens_failure_message,
+        DatalensBlockQuery, DatalensLogQuery, DatalensLogQueryResult, DatalensLogReader,
+        IncompleteReason,
     },
     decoder::EventDecoder,
-    planner::{MSGPORT_MESSAGE_SENT_TOPIC, TRON_CHAIN_ID, chain_dataset},
+    planner::chain_dataset,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -60,6 +60,7 @@ struct ProcessedRangeReport {
     records_decoded: u64,
     records_written: u64,
     checkpoints_advanced: u64,
+    stop_poll: bool,
 }
 
 trait RunReport {
@@ -228,7 +229,8 @@ where
         }
 
         let mut report = ChainRunReport::default();
-        while checkpoint.next_block <= target_block {
+        let mut stop_poll = false;
+        while checkpoint.next_block <= target_block && !stop_poll {
             let mut range = plan_next_range(&checkpoint, chain.batch_size).with_context(|| {
                 format!(
                     "plan ORMP checkpoint range chain_id={} dataset={} checkpoint_next_block={} batch_size={}",
@@ -238,7 +240,7 @@ where
             range.to_block = range.to_block.min(target_block);
 
             let range_report = self
-                .process_range_with_splitting(&chain, dataset, range, target_block)
+                .process_range(&chain, dataset, range, target_block)
                 .await?;
             report.ranges_queried += range_report.ranges_queried;
             report.records_read += range_report.records_read;
@@ -246,6 +248,7 @@ where
             report.records_written += range_report.records_written;
             report.checkpoints_advanced += range_report.checkpoints_advanced;
             checkpoint.next_block = range_report.next_block;
+            stop_poll = range_report.stop_poll;
         }
 
         if report.ranges_queried > 0 {
@@ -255,69 +258,35 @@ where
         Ok(report)
     }
 
-    async fn process_range_with_splitting(
+    async fn process_range(
         &self,
         chain: &ChainConfig,
         dataset: &str,
         range: BlockRange,
         target_block: u64,
     ) -> anyhow::Result<ProcessedRangeReport> {
-        let mut pending = vec![range];
-        let mut report = ProcessedRangeReport::default();
+        log_query_start(chain, dataset, range, target_block);
+        let batch_started = Instant::now();
+        let result = match self.query_range_once(chain, dataset, range).await {
+            Ok(result) => {
+                crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", true);
+                result
+            }
+            Err(error) => {
+                crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", false);
+                crate::metrics::record_range_failure(chain.chain_id, dataset);
+                return Err(error);
+            }
+        };
+        self.process_successful_range(chain, dataset, range, target_block, batch_started, result)
+            .await
+    }
 
-        while let Some(range) = pending.pop() {
-            log_query_start(chain, dataset, range, target_block);
-            let batch_started = Instant::now();
-            let result = match self.query_range_once(chain, dataset, range).await {
-                Ok(result) => {
-                    crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", true);
-                    result
-                }
-                Err(error) => {
-                    crate::metrics::record_datalens_request(chain.chain_id, dataset, "logs", false);
-                    if can_split_datalens_query_failure(&error, range) {
-                        let (left, right) = split_range(range);
-                        log::warn!(
-                            "splitting ORMP Datalens range after retryable failure chain_id={} dataset={} from_block={} to_block={} left_from_block={} left_to_block={} right_from_block={} right_to_block={} error={:#}",
-                            chain.chain_id,
-                            dataset,
-                            range.from_block,
-                            range.to_block,
-                            left.from_block,
-                            left.to_block,
-                            right.from_block,
-                            right.to_block,
-                            error
-                        );
-                        pending.push(right);
-                        pending.push(left);
-                        continue;
-                    }
-
-                    crate::metrics::record_range_failure(chain.chain_id, dataset);
-                    return Err(error);
-                }
-            };
-
-            let range_report = self
-                .process_successful_range(
-                    chain,
-                    dataset,
-                    range,
-                    target_block,
-                    batch_started,
-                    result,
-                )
-                .await?;
-            report.next_block = range_report.next_block;
-            report.ranges_queried += range_report.ranges_queried;
-            report.records_read += range_report.records_read;
-            report.records_decoded += range_report.records_decoded;
-            report.records_written += range_report.records_written;
-            report.checkpoints_advanced += range_report.checkpoints_advanced;
-        }
-
-        Ok(report)
+    async fn finalized_head(&self, chain_id: u64) -> anyhow::Result<u64> {
+        self.reader
+            .finalized_head(chain_id)
+            .await
+            .with_context(|| format!("query Datalens finalized head for chain {chain_id}"))
     }
 
     async fn query_range_once(
@@ -353,10 +322,45 @@ where
         batch_started: Instant,
         result: DatalensLogQueryResult,
     ) -> anyhow::Result<ProcessedRangeReport> {
+        let Some(served_end) = result.served_end else {
+            warn_stuck_incomplete(chain.chain_id, dataset, result.incomplete_reason);
+            log::info!(
+                "ORMP Datalens batch served nothing chain_id={} dataset={} from_block={} to_block={} incomplete={:?}",
+                chain.chain_id,
+                dataset,
+                range.from_block,
+                range.to_block,
+                result.incomplete_reason
+            );
+            return Ok(ProcessedRangeReport {
+                next_block: range.from_block,
+                ranges_queried: 1,
+                records_read: result.logs.len() as u64,
+                stop_poll: true,
+                ..ProcessedRangeReport::default()
+            });
+        };
+        let served_start = result.served_start.with_context(|| {
+            format!(
+                "Datalens log query served end without start chain_id={} dataset={} from_block={} to_block={}",
+                chain.chain_id, dataset, range.from_block, range.to_block
+            )
+        })?;
+        if served_start != range.from_block {
+            anyhow::bail!(
+                "Datalens log query served start {served_start} does not match from_block {} chain_id={} dataset={} to_block={}",
+                range.from_block,
+                chain.chain_id,
+                dataset,
+                range.to_block
+            );
+        }
+        let served_end = served_end.min(range.to_block);
+        warn_stuck_incomplete(chain.chain_id, dataset, result.incomplete_reason);
         let records_read = result.logs.len();
-        let logs = self
-            .enrich_logs_with_transaction_senders(chain, result.logs)
-            .await?;
+        let stop_poll = result.incomplete_reason.is_some() || served_end < range.to_block;
+        let incomplete_reason = result.incomplete_reason;
+        let logs = result.logs;
         let mut events = Vec::new();
         for log in &logs {
             let topic0 = log
@@ -376,15 +380,28 @@ where
                 )
             })?);
         }
-        let next_block = range.to_block.checked_add(1).with_context(|| {
+        let next_block = served_end.checked_add(1).with_context(|| {
             format!(
-                "ORMP checkpoint next block overflow chain_id={} dataset={} to_block={}",
-                chain.chain_id, dataset, range.to_block
+                "ORMP checkpoint next block overflow chain_id={} dataset={} served_end={served_end}",
+                chain.chain_id, dataset
             )
         })?;
-        let anchors = self
-            .block_anchors_for_range(chain, dataset, range, &logs)
-            .await?;
+        let served_range = BlockRange {
+            from_block: range.from_block,
+            to_block: served_end,
+        };
+        let Some(anchors) = self
+            .block_anchors_for_range(chain, dataset, served_range, &logs)
+            .await?
+        else {
+            return Ok(ProcessedRangeReport {
+                next_block: range.from_block,
+                ranges_queried: 1,
+                records_read: logs.len() as u64,
+                stop_poll: true,
+                ..ProcessedRangeReport::default()
+            });
+        };
         let written = self
             .writer
             .write_events_and_advance_checkpoint(
@@ -398,12 +415,17 @@ where
             .await
             .with_context(|| {
                 format!(
-                    "write ORMP events chain_id={} dataset={} from_block={} to_block={} next_block={}",
-                    chain.chain_id, dataset, range.from_block, range.to_block, next_block
+                    "write ORMP events chain_id={} dataset={} from_block={} served_end={served_end} next_block={next_block}",
+                    chain.chain_id, dataset, range.from_block
                 )
             })?;
 
-        let progress = batch_progress(range, target_block, next_block, batch_started.elapsed());
+        let progress = batch_progress(
+            served_range,
+            target_block,
+            next_block,
+            batch_started.elapsed(),
+        );
         crate::metrics::record_range_success(crate::metrics::RangeSuccessMetrics {
             chain_id: chain.chain_id,
             dataset,
@@ -415,7 +437,7 @@ where
             duration_seconds: batch_started.elapsed().as_secs_f64(),
         });
         log::info!(
-            "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true batch_blocks={} remaining_blocks={} batch_duration_ms={} current_rate_blocks_per_second={:.2} eta_seconds={}",
+            "ORMP Datalens batch completed chain_id={} dataset={} from_block={} to_block={} served_end={served_end} target_block={} records_count={} decoded_count={} written_count={} checkpoint_next_block={} checkpoint_advanced=true stop_poll={stop_poll} incomplete={:?} batch_blocks={} remaining_blocks={} batch_duration_ms={} current_rate_blocks_per_second={:.2} eta_seconds={}",
             chain.chain_id,
             dataset,
             range.from_block,
@@ -425,6 +447,7 @@ where
             events.len(),
             written,
             next_block,
+            incomplete_reason,
             progress.batch_blocks,
             progress.remaining_blocks,
             progress.batch_duration_ms,
@@ -439,75 +462,8 @@ where
             records_decoded: events.len() as u64,
             records_written: written as u64,
             checkpoints_advanced: 1,
+            stop_poll,
         })
-    }
-
-    async fn enrich_logs_with_transaction_senders(
-        &self,
-        chain: &ChainConfig,
-        mut logs: Vec<crate::datalens::DatalensLog>,
-    ) -> anyhow::Result<Vec<crate::datalens::DatalensLog>> {
-        if chain.chain_id == TRON_CHAIN_ID || logs.iter().all(|log| log.transaction_from.is_some())
-        {
-            return Ok(logs);
-        }
-
-        let sender_blocks =
-            logs.iter()
-                .filter(|log| {
-                    log.transaction_from.is_none()
-                        && log.topics.first().is_some_and(|topic| {
-                            topic.eq_ignore_ascii_case(MSGPORT_MESSAGE_SENT_TOPIC)
-                        })
-                })
-                .map(|log| log.block_number)
-                .collect::<BTreeSet<_>>();
-        if sender_blocks.is_empty() {
-            return Ok(logs);
-        }
-
-        let mut transactions = Vec::new();
-        for block_number in sender_blocks {
-            let result = self
-                .reader
-                .query_transactions(DatalensTransactionQuery {
-                    chain_id: chain.chain_id,
-                    from_block: block_number,
-                    to_block: block_number,
-                    finality_mode: chain.finality_mode,
-                })
-                .await;
-            crate::metrics::record_datalens_request(
-                chain.chain_id,
-                chain_dataset(chain.chain_id).unwrap_or("unknown"),
-                "transactions",
-                result.is_ok(),
-            );
-            transactions.extend(
-                result
-                    .with_context(|| {
-                        format!(
-                            "query ORMP Datalens transactions chain_id={} block_number={}",
-                            chain.chain_id, block_number
-                        )
-                    })?
-                    .transactions,
-            );
-        }
-        let senders = transactions
-            .into_iter()
-            .map(|transaction| (sender_hash_key(&transaction.hash), transaction.from))
-            .collect::<HashMap<_, _>>();
-
-        for log in &mut logs {
-            if log.transaction_from.is_none() {
-                log.transaction_from = senders
-                    .get(&sender_hash_key(&log.transaction_hash))
-                    .cloned();
-            }
-        }
-
-        Ok(logs)
     }
 
     async fn rollback_reorged_anchors(
@@ -519,9 +475,11 @@ where
         let Some(to_block) = checkpoint_next_block.checked_sub(1) else {
             return Ok(None);
         };
+        let finalized = self.finalized_head(chain.chain_id).await?;
         let from_block = chain
             .start_block
-            .max(checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks));
+            .max(checkpoint_next_block.saturating_sub(self.config.reorg_window_blocks))
+            .max(finalized.saturating_add(1));
         if from_block > to_block {
             return Ok(None);
         }
@@ -560,6 +518,15 @@ where
                     chain.chain_id, dataset, from_block, to_block
                 )
             })?;
+        if !current_blocks.covers(from_block, to_block) {
+            warn_stuck_incomplete(chain.chain_id, dataset, current_blocks.incomplete_reason);
+            log::info!(
+                "ORMP Datalens reorg check waiting chain_id={} dataset={dataset} from_block={from_block} to_block={to_block} incomplete={:?}",
+                chain.chain_id,
+                current_blocks.incomplete_reason
+            );
+            return Ok(None);
+        }
         let current_blocks = current_blocks
             .blocks
             .into_iter()
@@ -605,15 +572,25 @@ where
         dataset: &str,
         range: BlockRange,
         logs: &[crate::datalens::DatalensLog],
-    ) -> anyhow::Result<Vec<BlockAnchor>> {
+    ) -> anyhow::Result<Option<Vec<BlockAnchor>>> {
         if !chain.finality_mode.uses_reorg_protection() {
-            return Ok(block_anchors_from_logs(
+            return Ok(Some(block_anchors_from_logs(
                 chain.chain_id,
                 dataset,
                 chain.finality_mode,
                 logs,
-            ));
+            )));
         }
+
+        let finalized = self.finalized_head(chain.chain_id).await?;
+        let from_block = range.from_block.max(finalized.saturating_add(1));
+        if from_block > range.to_block {
+            return Ok(Some(Vec::new()));
+        }
+        let range = BlockRange {
+            from_block,
+            to_block: range.to_block,
+        };
 
         let blocks_result = self
             .reader
@@ -636,6 +613,17 @@ where
                     chain.chain_id, dataset, range.from_block, range.to_block
                 )
             })?;
+        if !blocks.covers(range.from_block, range.to_block) {
+            warn_stuck_incomplete(chain.chain_id, dataset, blocks.incomplete_reason);
+            log::info!(
+                "ORMP Datalens block anchors waiting chain_id={} dataset={dataset} from_block={} to_block={} incomplete={:?}",
+                chain.chain_id,
+                range.from_block,
+                range.to_block,
+                blocks.incomplete_reason
+            );
+            return Ok(None);
+        }
 
         block_anchors_from_blocks(
             chain.chain_id,
@@ -644,16 +632,8 @@ where
             range,
             blocks.blocks,
         )
+        .map(Some)
     }
-}
-
-fn sender_hash_key(hash: &str) -> String {
-    let hash = hash.trim();
-    let hash = hash
-        .strip_prefix("0x")
-        .or_else(|| hash.strip_prefix("0X"))
-        .unwrap_or(hash);
-    format!("0x{}", hash.to_ascii_lowercase())
 }
 
 fn block_anchors_from_logs(
@@ -714,33 +694,21 @@ fn block_anchors_from_blocks(
     Ok(anchors)
 }
 
-fn can_split_datalens_query_failure(error: &anyhow::Error, range: BlockRange) -> bool {
-    if range.from_block >= range.to_block {
-        return false;
+fn warn_stuck_incomplete(chain_id: u64, dataset: &str, reason: Option<IncompleteReason>) {
+    let Some(reason) = reason else {
+        return;
+    };
+    if !matches!(
+        reason,
+        IncompleteReason::ProviderError | IncompleteReason::BudgetExhausted
+    ) {
+        return;
     }
-
-    let error = format!("{error:#}");
-    let failure_kind = classify_datalens_failure_message(&error);
-    if matches!(failure_kind, DatalensFailureKind::ProviderLimit) {
-        return true;
-    }
-
-    matches!(failure_kind, DatalensFailureKind::Transient)
-        && (error.contains("provider_failure") || error.contains("providerfailure"))
-}
-
-fn split_range(range: BlockRange) -> (BlockRange, BlockRange) {
-    let midpoint = range.from_block + (range.to_block - range.from_block) / 2;
-    (
-        BlockRange {
-            from_block: range.from_block,
-            to_block: midpoint,
-        },
-        BlockRange {
-            from_block: midpoint + 1,
-            to_block: range.to_block,
-        },
-    )
+    log::warn!(
+        "ORMP Datalens serve stalled chain_id={chain_id} dataset={dataset} incomplete={}",
+        reason.as_str()
+    );
+    crate::metrics::record_incomplete_serve(chain_id, dataset, reason.as_str());
 }
 
 fn log_query_start(chain: &ChainConfig, dataset: &str, range: BlockRange, target_block: u64) {

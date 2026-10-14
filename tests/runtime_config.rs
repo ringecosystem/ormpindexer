@@ -45,26 +45,6 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
         ("ORMPINDEXER_START_BLOCK".to_owned(), "1000".to_owned()),
         ("ORMPINDEXER_FINALITY_MODE".to_owned(), "durable".to_owned()),
         (
-            "ORMPINDEXER_DATALENS_WARMUP_ENABLED".to_owned(),
-            "true".to_owned(),
-        ),
-        (
-            "ORMPINDEXER_DATALENS_WARMUP_ENSURE_ON_STARTUP".to_owned(),
-            "false".to_owned(),
-        ),
-        (
-            "ORMPINDEXER_DATALENS_WARMUP_REQUIRED".to_owned(),
-            "true".to_owned(),
-        ),
-        (
-            "ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE".to_owned(),
-            "500".to_owned(),
-        ),
-        (
-            "ORMPINDEXER_DATALENS_WARMUP_END_BLOCK".to_owned(),
-            "9000".to_owned(),
-        ),
-        (
             "ORMPINDEXER_CHAIN_1_CONTRACTS".to_owned(),
             "0x111,0x222".to_owned(),
         ),
@@ -106,11 +86,6 @@ fn test_runtime_config_from_env_map_reads_datalens_database_and_chain_settings()
     assert_eq!(config.reorg_window_blocks, 128);
     assert_eq!(config.metrics.refresh_delay, Duration::from_secs(5));
     assert_eq!(config.metrics.refresh_timeout, Duration::from_secs(10));
-    assert!(config.warmup.enabled);
-    assert!(!config.warmup.ensure_on_startup);
-    assert!(config.warmup.required);
-    assert_eq!(config.warmup.chunk_size, 500);
-    assert_eq!(config.warmup.end_block, Some(9000));
     assert_eq!(
         config.chain(1).expect("chain 1").contracts,
         vec!["0x111", "0x222"]
@@ -306,30 +281,6 @@ fn test_runtime_config_rejects_zero_reorg_window_for_reorg_finality() {
 }
 
 #[test]
-fn test_runtime_config_from_env_map_reads_warmup_defaults() {
-    let env = BTreeMap::from([
-        (
-            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
-            "https://datalens.example".to_owned(),
-        ),
-        (
-            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
-            "ormp-production".to_owned(),
-        ),
-        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
-        ("ORMPINDEXER_BATCH_SIZE".to_owned(), "250".to_owned()),
-    ]);
-
-    let config = RuntimeConfig::from_env_map(&env).expect("config parses");
-
-    assert!(config.warmup.enabled);
-    assert!(config.warmup.ensure_on_startup);
-    assert!(!config.warmup.required);
-    assert_eq!(config.warmup.chunk_size, 250);
-    assert_eq!(config.warmup.end_block, None);
-}
-
-#[test]
 fn test_runtime_config_reads_datalens_retry_defaults() {
     let env = BTreeMap::from([
         (
@@ -431,33 +382,6 @@ fn test_runtime_config_rejects_zero_datalens_query_max_attempts() {
         error
             .to_string()
             .contains("ORMPINDEXER_DATALENS_QUERY_MAX_ATTEMPTS must be greater than zero")
-    );
-}
-
-#[test]
-fn test_runtime_config_rejects_zero_warmup_chunk_size() {
-    let env = BTreeMap::from([
-        (
-            "ORMPINDEXER_DATALENS_ENDPOINT".to_owned(),
-            "https://datalens.example".to_owned(),
-        ),
-        (
-            "ORMPINDEXER_DATALENS_APPLICATION".to_owned(),
-            "ormp-production".to_owned(),
-        ),
-        ("ORMPINDEXER_ENABLED_CHAINS".to_owned(), "46".to_owned()),
-        (
-            "ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE".to_owned(),
-            "0".to_owned(),
-        ),
-    ]);
-
-    let error = RuntimeConfig::from_env_map(&env).expect_err("zero warmup chunk size is invalid");
-
-    assert!(
-        error
-            .to_string()
-            .contains("ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE must be greater than zero")
     );
 }
 

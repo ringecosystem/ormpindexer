@@ -527,6 +527,8 @@ fn format_metrics_with_status(
     body.push_str("# TYPE ormp_indexer_datalens_requests_total counter\n");
     body.push_str("# HELP ormp_indexer_reorg_rollbacks_total ORMP reorg rollbacks.\n");
     body.push_str("# TYPE ormp_indexer_reorg_rollbacks_total counter\n");
+    body.push_str("# HELP ormp_indexer_incomplete_serves_total ORMP queries that stopped on provider_error or budget_exhausted.\n");
+    body.push_str("# TYPE ormp_indexer_incomplete_serves_total counter\n");
 
     for row in &runtime.runtime_rows {
         let labels = runtime_labels(row.chain_id, &row.dataset);
@@ -645,6 +647,16 @@ fn format_metrics_with_status(
             &labels,
             row.reorg_rollbacks_total,
         );
+        for (reason, count) in &row.incomplete_serves_total {
+            let mut reason_labels = labels.clone();
+            reason_labels.push(("reason", reason.clone()));
+            append_metric(
+                &mut body,
+                "ormp_indexer_incomplete_serves_total",
+                &reason_labels,
+                *count,
+            );
+        }
     }
 
     body.push_str("# HELP ormp_indexer_legacy_table_rows Legacy GraphQL table row counts.\n");
@@ -683,11 +695,6 @@ fn append_datalens_request_metrics(body: &mut String, row: &crate::metrics::Runt
             "blocks",
             row.datalens_block_requests_success_total,
             row.datalens_block_requests_failure_total,
-        ),
-        (
-            "transactions",
-            row.datalens_tx_requests_success_total,
-            row.datalens_tx_requests_failure_total,
         ),
     ] {
         append_metric(

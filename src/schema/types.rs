@@ -32,21 +32,18 @@ pub enum LegacyIdRule {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventSource {
     Evm,
-    Tron,
 }
 
 impl EventSource {
     pub fn transaction_from_source(self) -> Option<&'static str> {
         match self {
             Self::Evm => Some("transaction.from"),
-            Self::Tron => Some("transaction.internalTransactions[logIndex].callerAddress"),
         }
     }
 
     pub fn event_index_source(self) -> &'static str {
         match self {
             Self::Evm => "log.logIndex",
-            Self::Tron => "log.logIndex as eventIndex-compatible slot",
         }
     }
 }

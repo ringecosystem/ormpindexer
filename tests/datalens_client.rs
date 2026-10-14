@@ -1,442 +1,720 @@
-use ormpindexer::{
-    config::FinalityMode,
-    datalens::{
-        DatalensFailureKind, DatalensLog, blocks_from_native_query_payload, chain_head_finality,
-        classify_datalens_failure_message, evm_chain_name, logs_from_native_query_payload,
-        native_graphql_block_request, native_graphql_request, native_graphql_transaction_request,
-        transactions_from_native_query_payload, tron_chain_name,
-    },
-    planner::TRON_CHAIN_ID,
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
-#[test]
-fn test_datalens_log_decodes_native_graphql_camel_case_response() {
-    let log: DatalensLog = serde_json::from_value(serde_json::json!({
-        "id": "46-0xtx-3",
-        "chainId": 46,
-        "blockNumber": 123,
-        "blockTimestamp": 456,
-        "transactionHash": "0xtx",
-        "transactionIndex": 2,
-        "logIndex": 3,
-        "address": "0xcontract",
-        "transactionFrom": "0xsender",
-        "topics": ["0xtopic"],
-        "data": "0xdata"
-    }))
-    .expect("decode native GraphQL log shape");
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::any,
+};
+use ormpindexer::{
+    config::{DatalensConfig, FinalityMode, SecretString},
+    datalens::{
+        DatalensBlockQuery, DatalensHttpClient, DatalensLogQuery, DatalensLogReader,
+        IncompleteReason,
+    },
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
-    assert_eq!(log.id.as_deref(), Some("46-0xtx-3"));
-    assert_eq!(log.chain_id, 46);
-    assert_eq!(log.block_number, 123);
-    assert_eq!(log.block_timestamp, Some(456));
-    assert_eq!(log.transaction_hash, "0xtx");
-    assert_eq!(log.transaction_index, Some(2));
-    assert_eq!(log.log_index, 3);
-    assert_eq!(log.address, "0xcontract");
-    assert_eq!(log.transaction_from.as_deref(), Some("0xsender"));
-    assert_eq!(log.topics, vec!["0xtopic"]);
-    assert_eq!(log.data, "0xdata");
+#[derive(Clone)]
+struct Mock(Arc<MockInner>);
+
+struct MockInner {
+    calls: Mutex<Vec<Recorded>>,
+    script: Mutex<VecDeque<Scripted>>,
 }
 
-#[test]
-fn test_datalens_log_decodes_legacy_snake_case_response() {
-    let log: DatalensLog = serde_json::from_value(serde_json::json!({
-        "id": "46-0xtx-7",
-        "chain_id": 46,
-        "block_number": 123,
-        "block_timestamp": 456,
-        "transaction_hash": "0xtx",
-        "transaction_index": 2,
-        "eventIndex": 7,
-        "address": "0xcontract",
-        "transaction_from": "0xsender",
-        "topics": ["0xtopic"],
-        "data": "0xdata"
-    }))
-    .expect("decode legacy-compatible log shape");
-
-    assert_eq!(log.id.as_deref(), Some("46-0xtx-7"));
-    assert_eq!(log.chain_id, 46);
-    assert_eq!(log.block_number, 123);
-    assert_eq!(log.block_timestamp, Some(456));
-    assert_eq!(log.transaction_hash, "0xtx");
-    assert_eq!(log.transaction_index, Some(2));
-    assert_eq!(log.log_index, 7);
-    assert_eq!(log.address, "0xcontract");
-    assert_eq!(log.transaction_from.as_deref(), Some("0xsender"));
-    assert_eq!(log.topics, vec!["0xtopic"]);
-    assert_eq!(log.data, "0xdata");
+struct Scripted {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Value,
 }
 
-#[test]
-fn test_native_query_rows_decode_with_context_metadata() {
-    let logs = logs_from_native_query_payload(
-        &serde_json::json!({
-            "data": {
-                "query": {
-                    "rows": {
-                        "dataset_key": { "family": { "kind": "evm" }, "name": "logs" },
-                        "rows": {
-                            "dataset": "logs",
-                            "rows": [{
-                                "block_number": 123,
-                                "block_hash": "0xblock",
-                                "parent_hash": "0xparent",
-                                "block_timestamp": 456,
-                                "transaction_hash": "0xtx",
-                                "transaction_index": 2,
-                                "log_index": 3,
-                                "address": "0xcontract",
-                                "topics": ["0xtopic"],
-                                "data": "0xdata",
-                                "removed": false
-                            }]
-                        }
-                    }
-                }
-            }
-        }),
-        46,
-    )
-    .expect("decode native query rows");
-
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].id.as_deref(), Some("46-123-0xtx-3"));
-    assert_eq!(logs[0].chain_id, 46);
-    assert_eq!(logs[0].block_number, 123);
-    assert_eq!(logs[0].block_hash.as_deref(), Some("0xblock"));
-    assert_eq!(logs[0].parent_hash.as_deref(), Some("0xparent"));
-    assert_eq!(logs[0].block_timestamp, Some(456));
-    assert_eq!(logs[0].transaction_hash, "0xtx");
-    assert_eq!(logs[0].transaction_index, Some(2));
-    assert_eq!(logs[0].log_index, 3);
-    assert_eq!(logs[0].address, "0xcontract");
-    assert_eq!(logs[0].transaction_from, None);
-    assert_eq!(logs[0].topics, vec!["0xtopic"]);
-    assert_eq!(logs[0].data, "0xdata");
+struct Recorded {
+    path: String,
+    headers: HeaderMap,
+    body: Value,
 }
 
-#[test]
-fn test_evm_transaction_query_uses_transactions_dataset_and_decodes_senders() {
-    let request =
-        native_graphql_transaction_request(&ormpindexer::datalens::DatalensTransactionQuery {
-            chain_id: 46,
-            from_block: 100,
-            to_block: 110,
-            finality_mode: ormpindexer::config::FinalityMode::Durable,
-        })
-        .expect("build transaction request");
-    let input = &request["variables"]["input"];
+impl Mock {
+    fn new(script: Vec<Scripted>) -> Self {
+        Self(Arc::new(MockInner {
+            calls: Mutex::new(Vec::new()),
+            script: Mutex::new(script.into()),
+        }))
+    }
 
-    assert_eq!(
-        input["datasetKey"],
-        serde_json::json!({"family": "evm", "name": "transactions"})
-    );
-    assert_eq!(input["selector"], serde_json::json!({"kind": "all"}));
+    fn calls(&self) -> Vec<(String, Value)> {
+        self.0
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .map(|call| (call.path.clone(), call.body.clone()))
+            .collect()
+    }
 
-    let transactions = transactions_from_native_query_payload(
-        &serde_json::json!({
-            "data": {
-                "query": {
-                    "rows": {
-                        "dataset": "transactions",
-                        "rows": [{
-                            "hash": "0xtx",
-                            "block_number": 123,
-                            "from": "0xsender"
-                        }]
-                    }
-                }
-            }
-        }),
-        46,
-    )
-    .expect("decode transaction rows");
-
-    assert_eq!(transactions.len(), 1);
-    assert_eq!(transactions[0].hash, "0xtx");
-    assert_eq!(transactions[0].block_number, 123);
-    assert_eq!(transactions[0].from, "0xsender");
-}
-
-#[test]
-fn test_block_query_uses_blocks_dataset_and_decodes_headers() {
-    let request = native_graphql_block_request(&ormpindexer::datalens::DatalensBlockQuery {
-        chain_id: 46,
-        from_block: 100,
-        to_block: 110,
-        finality_mode: ormpindexer::config::FinalityMode::Safe,
-    })
-    .expect("build block request");
-    let input = &request["variables"]["input"];
-
-    assert_eq!(
-        input["datasetKey"],
-        serde_json::json!({"family": "evm", "name": "blocks"})
-    );
-    assert_eq!(input["selector"], serde_json::json!({"kind": "all"}));
-    assert_eq!(input["finality"], "safe_to_latest");
-
-    let blocks = blocks_from_native_query_payload(
-        &serde_json::json!({
-            "data": {
-                "query": {
-                    "rows": {
-                        "dataset": "blocks",
-                        "rows": [{
-                            "number": 123,
-                            "hash": "0xblock",
-                            "parent_hash": "0xparent"
-                        }]
-                    }
-                }
-            }
-        }),
-        46,
-    )
-    .expect("decode block rows");
-
-    assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].chain_id, 46);
-    assert_eq!(blocks[0].block_number, 123);
-    assert_eq!(blocks[0].block_hash, "0xblock");
-    assert_eq!(blocks[0].parent_hash.as_deref(), Some("0xparent"));
-}
-
-#[test]
-fn test_tron_native_query_rows_decode_with_context_metadata() {
-    let logs = logs_from_native_query_payload(
-        &serde_json::json!({
-            "data": {
-                "query": {
-                    "rows": {
-                        "dataset_key": { "family": { "kind": "tron" }, "name": "events" },
-                        "rows": {
-                            "dataset": "events",
-                            "rows": [{
-                                "contract_address": "41ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
-                                "event_name": "MessageSent",
-                                "event_signature": "MessageSent(bytes32,address,uint256,address,bytes,bytes)",
-                                "indexed_fields": [],
-                                "non_indexed_fields": {
-                                    "msgId": "0x1111111111111111111111111111111111111111111111111111111111111111",
-                                    "fromDapp": "0x0000000000000000000000000000000000000030",
-                                    "toChainId": "42161",
-                                    "toDapp": "0x0000000000000000000000000000000000000031",
-                                    "message": "0xaa",
-                                    "params": "0xbbcc"
-                                },
-                                "transaction_id": "trontx",
-                                "block_number": 123,
-                                "block_hash": "0xblock",
-                                "parent_hash": "0xparent",
-                                "block_timestamp": 456,
-                                "transaction_index": 2,
-                                "event_index": 3,
-                                "confirmed": true,
-                                "source": { "provider": "trongrid_contract_events" }
-                            }]
-                        }
-                    }
-                }
-            }
-        }),
-        TRON_CHAIN_ID,
-    )
-    .expect("decode native Tron query rows");
-
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0].id.as_deref(), Some("728126428-123-trontx-3"));
-    assert_eq!(logs[0].chain_id, TRON_CHAIN_ID);
-    assert_eq!(logs[0].block_number, 123);
-    assert_eq!(logs[0].block_hash.as_deref(), Some("0xblock"));
-    assert_eq!(logs[0].parent_hash.as_deref(), Some("0xparent"));
-    assert_eq!(logs[0].block_timestamp, Some(456));
-    assert_eq!(logs[0].transaction_hash, "trontx");
-    assert_eq!(logs[0].transaction_index, Some(2));
-    assert_eq!(logs[0].log_index, 3);
-    assert_eq!(
-        logs[0].address,
-        "41ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"
-    );
-    assert_eq!(logs[0].transaction_from, None);
-    assert_eq!(logs[0].event_name.as_deref(), Some("MessageSent"));
-    assert_eq!(
-        logs[0].event_signature.as_deref(),
-        Some("MessageSent(bytes32,address,uint256,address,bytes,bytes)")
-    );
-    assert_eq!(
-        logs[0].non_indexed_fields.as_ref().expect("decoded args")["toChainId"],
-        "42161"
-    );
-}
-
-#[test]
-fn test_tron_native_query_rows_decode_nested_empty_adapter_response() {
-    let logs = logs_from_native_query_payload(
-        &serde_json::json!({
-            "data": {
-                "query": {
-                    "rows": {
-                        "dataset_key": { "family": { "Other": "tron" }, "name": "events" },
-                        "rows": {
-                            "dataset": "adapter_json",
-                            "rows": {
-                                "dataset_key": { "family": { "Other": "tron" }, "name": "events" },
-                                "rows": []
-                            }
-                        }
-                    }
-                }
-            }
-        }),
-        TRON_CHAIN_ID,
-    )
-    .expect("decode nested empty Tron adapter response");
-
-    assert!(logs.is_empty());
-}
-
-#[test]
-fn test_tron_native_graphql_request_uses_other_selector_shape() {
-    let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
-        chain_id: TRON_CHAIN_ID,
-        from_block: 100,
-        to_block: 110,
-        contracts: vec!["TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned()],
-        topics: vec!["MessageDispatched".to_owned(), "MessageAccepted".to_owned()],
-        finality_mode: ormpindexer::config::FinalityMode::Durable,
-    })
-    .expect("build Tron request");
-    let input = &request["variables"]["input"];
-
-    assert_eq!(
-        input["chain"]["family"],
-        serde_json::json!({"kind": "other", "other": "tron"})
-    );
-    assert_eq!(input["chain"]["configuredName"], "tron-mainnet");
-    assert_eq!(
-        input["chain"]["networkId"],
-        serde_json::json!({"numeric": TRON_CHAIN_ID})
-    );
-    assert_eq!(
-        input["datasetKey"],
-        serde_json::json!({"family": "tron", "name": "events"})
-    );
-    assert_eq!(input["selector"]["kind"], "other");
-    assert_eq!(input["selector"]["other"]["kind"], "tron_events");
-    assert_eq!(
-        input["selector"]["other"]["canonicalKey"],
-        "contracts/TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t/events/MessageAccepted+MessageDispatched"
-    );
-    assert_eq!(
-        input["selector"]["other"]["fingerprint"],
-        "tron-events/ormp-v3/2edc7c1723a90acd0d3d37c0"
-    );
-    assert_eq!(
-        input["range"],
-        serde_json::json!({"kind": "block", "start": 100, "end": 110})
-    );
-    assert_eq!(input["finality"], "durable_only");
-}
-
-#[test]
-fn test_evm_native_graphql_request_uses_datalens_finality_enum() {
-    for (finality_mode, expected) in [
-        (FinalityMode::Finalized, "durable_only"),
-        (FinalityMode::Durable, "durable_only"),
-        (FinalityMode::Safe, "safe_to_latest"),
-        (FinalityMode::Latest, "latest_only"),
-    ] {
-        let request = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
-            chain_id: 42161,
-            from_block: 466_386_813,
-            to_block: 466_386_813,
-            contracts: vec!["0x2cd1867fb8016f93710b6386f7f9f1d540a60812".to_owned()],
-            topics: Vec::new(),
-            finality_mode,
-        })
-        .expect("build EVM request");
-
-        assert_eq!(request["variables"]["input"]["finality"], expected);
+    fn headers(&self, index: usize) -> HeaderMap {
+        self.0.calls.lock().expect("calls")[index].headers.clone()
     }
 }
 
-#[test]
-fn test_chain_head_finality_maps_runtime_modes_to_datalens_head_finality() {
-    assert_eq!(chain_head_finality(FinalityMode::Finalized), "finalized");
-    assert_eq!(chain_head_finality(FinalityMode::Durable), "finalized");
-    assert_eq!(chain_head_finality(FinalityMode::Safe), "safe");
-    assert_eq!(chain_head_finality(FinalityMode::Latest), "latest");
+async fn handle(State(mock): State<Mock>, request: Request) -> Response {
+    let path = request.uri().path().to_owned();
+    let headers = request.headers().clone();
+    let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .expect("read body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("request json")
+    };
+    let query = if path == "/v1/query" {
+        match validate_query(&body) {
+            Ok(query) => Some(query),
+            Err(message) => {
+                mock.0.calls.lock().expect("calls").push(Recorded {
+                    path,
+                    headers,
+                    body,
+                });
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {"kind": "invalid_input", "message": message}
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+    mock.0.calls.lock().expect("calls").push(Recorded {
+        path,
+        headers,
+        body,
+    });
+    let scripted = mock
+        .0
+        .script
+        .lock()
+        .expect("script")
+        .pop_front()
+        .expect("scripted response");
+    let mut response_body = scripted.body;
+    if let Some(query) = query {
+        project_rows(&mut response_body, query.fields.as_ref());
+    }
+    let mut response = (scripted.status, Json(response_body)).into_response();
+    response.headers_mut().extend(scripted.headers);
+    response
 }
 
-#[test]
-fn test_tron_native_graphql_request_rejects_invalid_contract_address() {
-    let error = native_graphql_request(&ormpindexer::datalens::DatalensLogQuery {
-        chain_id: TRON_CHAIN_ID,
-        from_block: 100,
-        to_block: 110,
-        contracts: vec!["not/a/tron/address".to_owned()],
-        topics: Vec::new(),
-        finality_mode: ormpindexer::config::FinalityMode::Durable,
+fn ok(body: Value) -> Scripted {
+    Scripted {
+        status: StatusCode::OK,
+        headers: HeaderMap::new(),
+        body,
+    }
+}
+
+fn http_status(status: StatusCode, body: Value) -> Scripted {
+    Scripted {
+        status,
+        headers: HeaderMap::new(),
+        body,
+    }
+}
+
+async fn serve(mock: Mock) -> String {
+    let app = Router::new().fallback(any(handle)).with_state(mock);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://{address}")
+}
+
+fn config(endpoint: &str, attempts: u64) -> DatalensConfig {
+    DatalensConfig {
+        endpoint: endpoint.to_owned(),
+        application: "ormp".to_owned(),
+        token: Some(SecretString::new("secret-token")),
+        timeout: Duration::from_secs(5),
+        query_max_attempts: attempts,
+        head_buffer_blocks: 1,
+        min_request_interval: Duration::ZERO,
+    }
+}
+
+const ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+const SENDER: &str = "0x2222222222222222222222222222222222222222";
+const TOPIC_A: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const TOPIC_B: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const BLOCK_HASH: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const TX_HASH: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+fn log_fields() -> Vec<&'static str> {
+    vec![
+        "block_number",
+        "block_hash",
+        "transaction_hash",
+        "transaction_index",
+        "log_index",
+        "address",
+        "topics",
+        "data",
+        "block_timestamp",
+        "transaction_from",
+    ]
+}
+
+fn log_query() -> DatalensLogQuery {
+    DatalensLogQuery {
+        chain_id: 46,
+        from_block: 10,
+        to_block: 14,
+        contracts: vec![ADDRESS.to_owned()],
+        topics: vec![TOPIC_A.to_owned(), TOPIC_B.to_owned()],
+        finality_mode: FinalityMode::Finalized,
+    }
+}
+
+fn expected_log_body() -> Value {
+    json!({
+        "chain": "darwinia",
+        "dataset": "evm.logs",
+        "selector": {
+            "addresses": [ADDRESS],
+            "topics": [[TOPIC_A, TOPIC_B]]
+        },
+        "range": {"start": 10, "end": 14},
+        "finality": "durable_only",
+        "fields": log_fields()
     })
-    .expect_err("invalid Tron address should fail");
+}
 
-    assert!(
-        error
-            .to_string()
-            .contains("Tron contract address must be hex")
+fn log_row(block_number: u64, log_index: u32) -> Value {
+    json!({
+        "block_number": block_number,
+        "block_hash": BLOCK_HASH,
+        "block_timestamp": 1_700_000_000,
+        "transaction_hash": TX_HASH,
+        "transaction_index": 1,
+        "log_index": log_index,
+        "address": ADDRESS,
+        "topics": [TOPIC_A],
+        "data": "0x",
+        "finality": "finalized",
+        "transaction_from": SENDER
+    })
+}
+
+fn query_response(
+    served_end: Option<u64>,
+    reason: Option<&str>,
+    cursor: Option<&str>,
+    rows: Vec<Value>,
+) -> Value {
+    json!({
+        "chain": "darwinia",
+        "dataset": "evm.logs",
+        "requested": {"start": 10, "end": 14},
+        "served": served_end.map(|end| json!({"start": 10, "end": end})),
+        "next_start": served_end.and_then(|end| (end < 14).then_some(end + 1)),
+        "incomplete_reason": reason,
+        "segments": [],
+        "rows": rows,
+        "page": {"next_cursor": cursor}
+    })
+}
+
+fn heads() -> Value {
+    json!({
+        "chain": "darwinia",
+        "latest": 120,
+        "latest_hash": "0x1",
+        "safe": 110,
+        "finalized": 100
+    })
+}
+
+fn assert_auth(headers: &HeaderMap) {
+    assert_eq!(
+        headers
+            .get("x-datalens-application")
+            .and_then(|value| value.to_str().ok()),
+        Some("ormp")
+    );
+    assert_eq!(
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer secret-token")
     );
 }
 
-#[test]
-fn test_evm_chain_name_rejects_unknown_chain_ids() {
-    assert_eq!(evm_chain_name(46).expect("darwinia chain name"), "darwinia");
-    assert!(evm_chain_name(99_999).is_err());
+#[tokio::test]
+async fn test_client_posts_log_query_and_reads_finality_from_heads() {
+    let mock = Mock::new(vec![
+        ok(heads()),
+        ok(heads()),
+        ok(heads()),
+        ok(heads()),
+        ok(query_response(Some(14), None, None, vec![log_row(12, 2)])),
+    ]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 1));
+
+    assert_eq!(
+        client
+            .latest_block(46, FinalityMode::Finalized)
+            .await
+            .expect("finalized head"),
+        100
+    );
+    assert_eq!(
+        client
+            .latest_block(46, FinalityMode::Durable)
+            .await
+            .expect("durable head"),
+        110
+    );
+    assert_eq!(
+        client
+            .latest_block(46, FinalityMode::Safe)
+            .await
+            .expect("safe head"),
+        110
+    );
+    assert_eq!(
+        client
+            .latest_block(46, FinalityMode::Latest)
+            .await
+            .expect("latest head"),
+        120
+    );
+    let logs = client.query_logs(log_query()).await.expect("logs");
+
+    assert_eq!(logs.served_end, Some(14));
+    assert_eq!(logs.incomplete_reason, None);
+    assert_eq!(logs.logs.len(), 1);
+    assert_eq!(logs.logs[0].chain_id, 46);
+    assert_eq!(logs.logs[0].block_number, 12);
+    assert_eq!(logs.logs[0].block_timestamp, Some(1_700_000_000));
+    assert_eq!(logs.logs[0].transaction_from.as_deref(), Some(SENDER));
+    assert_eq!(logs.logs[0].block_hash.as_deref(), Some(BLOCK_HASH));
+    let log_id = format!("46-12-{TX_HASH}-2");
+    assert_eq!(logs.logs[0].id.as_deref(), Some(log_id.as_str()));
+    let calls = mock.calls();
+    assert_eq!(calls[0].0, "/v1/heads/darwinia");
+    assert_eq!(calls[0].1, Value::Null);
+    assert_eq!(calls[4].0, "/v1/query");
+    assert_eq!(calls[4].1, expected_log_body());
+    let request = validate_query(&calls[4].1).expect("query matches the wire schema");
+    assert_eq!(
+        request.fields.expect("fields"),
+        log_fields()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
+    assert_auth(&mock.headers(4));
 }
 
-#[test]
-fn test_tron_chain_name_rejects_unknown_chain_ids() {
+#[tokio::test]
+async fn test_client_follows_page_cursor_and_keeps_rows() {
+    let mock = Mock::new(vec![
+        ok(query_response(
+            Some(14),
+            None,
+            Some("cursor-1"),
+            vec![log_row(12, 1)],
+        )),
+        ok(query_response(Some(14), None, None, vec![log_row(13, 4)])),
+    ]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 1));
+
+    let logs = client.query_logs(log_query()).await.expect("paged logs");
+
     assert_eq!(
-        tron_chain_name(TRON_CHAIN_ID).expect("tron mainnet"),
-        "tron-mainnet"
+        logs.logs
+            .iter()
+            .map(|log| log.log_index)
+            .collect::<Vec<_>>(),
+        vec![1, 4]
     );
-    assert!(tron_chain_name(46).is_err());
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].1, expected_log_body());
+    assert_eq!(
+        calls[1].1,
+        json!({
+            "chain": "darwinia",
+            "dataset": "evm.logs",
+            "selector": {
+            "addresses": [ADDRESS],
+            "topics": [[TOPIC_A, TOPIC_B]]
+            },
+            "range": {"start": 10, "end": 14},
+            "finality": "durable_only",
+            "fields": log_fields(),
+            "page": {"cursor": "cursor-1"}
+        })
+    );
 }
 
-#[test]
-fn test_datalens_failure_classifies_provider_limits() {
+#[tokio::test]
+async fn test_client_retries_pending_then_returns_the_served_prefix() {
+    let mock = Mock::new(vec![
+        ok(query_response(
+            Some(11),
+            Some("pending"),
+            None,
+            vec![log_row(11, 1)],
+        )),
+        ok(query_response(
+            Some(11),
+            Some("pending"),
+            None,
+            vec![log_row(11, 1)],
+        )),
+    ]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 2));
+
+    let logs = client.query_logs(log_query()).await.expect("partial logs");
+
+    assert_eq!(logs.served_end, Some(11));
+    assert_eq!(logs.incomplete_reason, Some(IncompleteReason::Pending));
+    assert_eq!(logs.logs.len(), 1);
+    assert_eq!(mock.calls().len(), 2);
+    assert_eq!(mock.calls()[0].1, expected_log_body());
+    assert_eq!(mock.calls()[1].1, expected_log_body());
+}
+
+#[tokio::test]
+async fn test_client_retries_quota_exceeded_then_reads_the_log_page() {
+    let mut limited = http_status(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"error": {"kind": "quota_exceeded", "message": "slow down"}}),
+    );
+    limited.headers.insert(
+        reqwest::header::RETRY_AFTER,
+        "0".parse().expect("retry-after"),
+    );
+    let mock = Mock::new(vec![
+        limited,
+        ok(query_response(Some(14), None, None, vec![log_row(12, 2)])),
+    ]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 2));
+
+    let logs = client
+        .query_logs(log_query())
+        .await
+        .expect("logs after retry");
+
+    assert_eq!(logs.logs[0].transaction_from.as_deref(), Some(SENDER));
+    assert_eq!(mock.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn test_client_posts_block_anchor_query_without_a_selector() {
+    let mock = Mock::new(vec![ok(json!({
+        "chain": "arbitrum",
+        "dataset": "evm.blocks",
+        "requested": {"start": 20, "end": 21},
+        "served": {"start": 20, "end": 21},
+        "next_start": null,
+        "incomplete_reason": null,
+        "segments": [],
+        "rows": [{
+            "number": 20,
+            "hash": BLOCK_HASH,
+            "parent_hash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "timestamp": 1_700_000_000,
+            "finality": "safe"
+        }],
+        "page": {"next_cursor": null}
+    }))]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 1));
+
+    let blocks = client
+        .query_blocks(DatalensBlockQuery {
+            chain_id: 42161,
+            from_block: 20,
+            to_block: 21,
+            finality_mode: FinalityMode::Safe,
+        })
+        .await
+        .expect("blocks");
+
+    assert_eq!(blocks.blocks.len(), 1);
+    assert_eq!(blocks.blocks[0].block_number, 20);
+    assert_eq!(blocks.blocks[0].block_hash, BLOCK_HASH);
     assert_eq!(
-        classify_datalens_failure_message("query returns too many logs, narrow your filter"),
-        DatalensFailureKind::ProviderLimit
+        blocks.blocks[0].parent_hash.as_deref(),
+        Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
     );
     assert_eq!(
-        classify_datalens_failure_message("provider range limit exceeded"),
-        DatalensFailureKind::ProviderLimit
+        mock.calls()[0].1,
+        json!({
+            "chain": "arbitrum",
+            "dataset": "evm.blocks",
+            "range": {"start": 20, "end": 21},
+            "finality": "safe_to_latest"
+        })
     );
 }
 
-#[test]
-fn test_datalens_failure_classifies_transient_errors() {
+#[tokio::test]
+async fn test_client_returns_an_incomplete_block_query() {
+    let mock = Mock::new(vec![ok(json!({
+        "chain": "arbitrum",
+        "dataset": "evm.blocks",
+        "requested": {"start": 20, "end": 21},
+        "served": {"start": 20, "end": 20},
+        "next_start": 21,
+        "incomplete_reason": "not_followed_yet",
+        "segments": [],
+        "rows": [],
+        "page": {"next_cursor": null}
+    }))]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 3));
+
+    let blocks = client
+        .query_blocks(DatalensBlockQuery {
+            chain_id: 42161,
+            from_block: 20,
+            to_block: 21,
+            finality_mode: FinalityMode::Latest,
+        })
+        .await
+        .expect("incomplete blocks are returned");
+
     assert_eq!(
-        classify_datalens_failure_message("ProviderFailure: upstream returned 502"),
-        DatalensFailureKind::Transient
+        blocks.incomplete_reason,
+        Some(IncompleteReason::NotFollowedYet)
     );
-    assert_eq!(
-        classify_datalens_failure_message("request timed out after 300 seconds"),
-        DatalensFailureKind::Transient
-    );
-    assert_eq!(
-        classify_datalens_failure_message("rate-limit 429"),
-        DatalensFailureKind::Transient
-    );
+    assert!(!blocks.covers(20, 21));
+    assert_eq!(mock.calls()[0].1["finality"], json!("safe_to_latest"));
+    assert_eq!(mock.calls().len(), 1);
 }
 
-#[test]
-fn test_datalens_failure_classifies_other_errors() {
-    assert_eq!(
-        classify_datalens_failure_message("permission denied"),
-        DatalensFailureKind::Other
-    );
+#[tokio::test]
+async fn test_client_returns_not_followed_yet_and_budget_exhausted_without_retry() {
+    for reason in ["not_followed_yet", "budget_exhausted"] {
+        let mock = Mock::new(vec![ok(query_response(
+            Some(11),
+            Some(reason),
+            None,
+            vec![log_row(11, 1)],
+        ))]);
+        let endpoint = serve(mock.clone()).await;
+        let client = DatalensHttpClient::new(config(&endpoint, 3));
+
+        let logs = client
+            .query_logs(log_query())
+            .await
+            .expect("incomplete page is returned");
+
+        assert_eq!(logs.served_end, Some(11));
+        assert_eq!(
+            logs.incomplete_reason.map(|reason| reason.as_str()),
+            Some(reason)
+        );
+        assert_eq!(mock.calls().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_client_does_not_retry_unauthorized() {
+    let mock = Mock::new(vec![http_status(
+        StatusCode::UNAUTHORIZED,
+        json!({"error": {"kind": "unauthorized", "message": "bad token"}}),
+    )]);
+    let endpoint = serve(mock.clone()).await;
+    let client = DatalensHttpClient::new(config(&endpoint, 3));
+
+    let error = client
+        .latest_block(1, FinalityMode::Latest)
+        .await
+        .expect_err("unauthorized");
+
+    assert!(error.to_string().contains("401"));
+    assert_eq!(mock.calls().len(), 1);
+    assert_eq!(mock.calls()[0].0, "/v1/heads/ethereum");
+}
+
+fn project_rows(body: &mut Value, fields: Option<&Vec<String>>) {
+    let Some(fields) = fields else {
+        return;
+    };
+    let Some(rows) = body.get_mut("rows").and_then(|rows| rows.as_array_mut()) else {
+        return;
+    };
+    for row in rows {
+        if let Some(object) = row.as_object_mut() {
+            object.retain(|key, _| fields.iter().any(|field| field == key));
+        }
+    }
+}
+
+fn validate_query(value: &Value) -> Result<QueryRequest, String> {
+    let request: QueryRequest =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    if !is_chain_name(&request.chain) {
+        return Err(format!("invalid chain name {}", request.chain));
+    }
+    if request.dataset != "evm.logs" && request.dataset != "evm.blocks" {
+        return Err(format!("unknown dataset {}", request.dataset));
+    }
+    if request.dataset == "evm.blocks" && request.selector.is_some() {
+        return Err("evm.blocks takes no selector".into());
+    }
+    if let Some(finality) = &request.finality
+        && !matches!(
+            finality.as_str(),
+            "durable_only" | "safe_to_latest" | "latest_only"
+        )
+    {
+        return Err(format!("unknown finality {finality}"));
+    }
+    if request.range.start > request.range.end {
+        return Err(format!(
+            "block range start {} is after end {}",
+            request.range.start, request.range.end
+        ));
+    }
+    if let Some(selector) = &request.selector {
+        if selector.topics.len() > 4 {
+            return Err(format!(
+                "selector has {} topic positions, at most 4 allowed",
+                selector.topics.len()
+            ));
+        }
+        for address in &selector.addresses {
+            if !is_hex(&address.0, 20) {
+                return Err(format!("invalid address {}", address.0));
+            }
+        }
+        for position in &selector.topics {
+            if position.0.is_empty() {
+                return Err("topic filter must list at least one topic".into());
+            }
+        }
+    }
+    let _ = request
+        .page
+        .as_ref()
+        .map(|page| (page.limit, page.cursor.as_deref()));
+    let _ = request.wait_ms;
+    Ok(request)
+}
+
+fn is_chain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+fn is_hex(value: &str, bytes: usize) -> bool {
+    let Some(rest) = value.strip_prefix("0x") else {
+        return false;
+    };
+    rest.len() == bytes * 2 && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryRequest {
+    chain: String,
+    dataset: String,
+    #[serde(default)]
+    selector: Option<LogSelector>,
+    range: WireRange,
+    #[serde(default)]
+    finality: Option<String>,
+    #[serde(default)]
+    fields: Option<Vec<String>>,
+    #[serde(default)]
+    page: Option<PageRequest>,
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageRequest {
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRange {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogSelector {
+    #[serde(default)]
+    addresses: Vec<Hex20>,
+    #[serde(default)]
+    topics: Vec<TopicPosition>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+struct Hex20(String);
+
+impl TryFrom<String> for Hex20 {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, String> {
+        if is_hex(&value, 20) {
+            Ok(Self(value))
+        } else {
+            Err(format!("invalid address {value}"))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "Vec<String>")]
+struct TopicPosition(Vec<String>);
+
+impl TryFrom<Vec<String>> for TopicPosition {
+    type Error = String;
+
+    fn try_from(values: Vec<String>) -> Result<Self, String> {
+        if values.is_empty() {
+            return Err("topic filter must list at least one topic".into());
+        }
+        for value in &values {
+            if !is_hex(value, 32) {
+                return Err(format!("invalid topic {value}"));
+            }
+        }
+        Ok(Self(values))
+    }
 }

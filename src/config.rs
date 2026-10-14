@@ -2,15 +2,11 @@ use std::{collections::BTreeMap, env, fmt, time::Duration};
 
 use anyhow::{Context, bail};
 
-use crate::{
-    planner::{TRON_CHAIN_ID, default_chain_config},
-    warmup::DatalensWarmupConfig,
-};
+use crate::planner::default_chain_config;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     pub datalens: DatalensConfig,
-    pub warmup: DatalensWarmupConfig,
     pub metrics: MetricsConfig,
     pub database_url: Option<SecretString>,
     pub enabled_chains: Vec<ChainConfig>,
@@ -68,11 +64,6 @@ impl RuntimeConfig {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let warmup_chunk_size =
-            optional_u64(env, "ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE")?.unwrap_or(batch_size);
-        if warmup_chunk_size == 0 {
-            bail!("ORMPINDEXER_DATALENS_WARMUP_CHUNK_SIZE must be greater than zero");
-        }
         let datalens_timeout_secs =
             optional_u64(env, "ORMPINDEXER_DATALENS_TIMEOUT_SECS")?.unwrap_or(300);
         if datalens_timeout_secs == 0 {
@@ -109,18 +100,6 @@ impl RuntimeConfig {
                 query_max_attempts: datalens_query_max_attempts,
                 head_buffer_blocks: datalens_head_buffer_blocks,
                 min_request_interval: Duration::from_millis(datalens_min_request_interval_ms),
-            },
-            warmup: DatalensWarmupConfig {
-                enabled: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_ENABLED")?.unwrap_or(true),
-                ensure_on_startup: optional_bool(
-                    env,
-                    "ORMPINDEXER_DATALENS_WARMUP_ENSURE_ON_STARTUP",
-                )?
-                .unwrap_or(true),
-                required: optional_bool(env, "ORMPINDEXER_DATALENS_WARMUP_REQUIRED")?
-                    .unwrap_or(false),
-                chunk_size: warmup_chunk_size,
-                end_block: optional_u64(env, "ORMPINDEXER_DATALENS_WARMUP_END_BLOCK")?,
             },
             metrics,
             database_url: optional_env(env, "ORMPINDEXER_DATABASE_URL").map(SecretString::new),
@@ -216,14 +195,9 @@ impl ChainConfig {
         let contracts = optional_list(env, &format!("{prefix}_CONTRACTS"));
         let topics = optional_list(env, &format!("{prefix}_TOPICS"));
         let chain_start_block = optional_u64(env, &format!("{prefix}_START_BLOCK"))?;
-        let start_block = if chain_id == TRON_CHAIN_ID {
-            chain_start_block
-                .with_context(|| format!("{prefix}_START_BLOCK must be configured for Tron"))?
-        } else {
-            chain_start_block
-                .or(default_start_block)
-                .unwrap_or(default.start_block)
-        };
+        let start_block = chain_start_block
+            .or(default_start_block)
+            .unwrap_or(default.start_block);
         let batch_size =
             optional_u64(env, &format!("{prefix}_BATCH_SIZE"))?.unwrap_or(default_batch_size);
         if batch_size == 0 {
@@ -322,16 +296,6 @@ fn optional_u64(env: &BTreeMap<String, String>, key: &str) -> anyhow::Result<Opt
             value
                 .parse::<u64>()
                 .with_context(|| format!("parse {key} as u64"))
-        })
-        .transpose()
-}
-
-fn optional_bool(env: &BTreeMap<String, String>, key: &str) -> anyhow::Result<Option<bool>> {
-    optional_env(env, key)
-        .map(|value| match value.as_str() {
-            "true" | "1" | "yes" => Ok(true),
-            "false" | "0" | "no" => Ok(false),
-            _ => bail!("{key} must be true or false"),
         })
         .transpose()
 }
