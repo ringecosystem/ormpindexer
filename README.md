@@ -36,3 +36,41 @@ Optional environment variables:
 ```bash
 cargo run -- migrate
 ```
+
+## Temporary Tron recovery
+
+`tron-recovery` is a one-shot command independent of Datalens and normal enabled
+chains. It scans only ORMP MessageAccepted/MessageAssigned and Msgport MessageSent
+from Tron Solidity-confirmed blocks, then exits at the confirmed head sampled on
+startup. It does not submit blockchain transactions.
+
+```bash
+# Preview the supplied redemption transaction; no database connection is opened.
+ORMPINDEXER_TRON_RPC_URL=https://api.trongrid.io \
+  cargo run -- tron-recovery --from-block 87383828 --to-block 87383930 --dry-run
+
+# Set ORMPINDEXER_DATABASE_URL using the existing deployment secret first.
+ormpindexer tron-recovery --from-block 87383828
+```
+
+Set `ORMPINDEXER_TRON_RPC_URL` to a Tron HTTP API base or `/jsonrpc` URL;
+`ORMPINDEXER_TRON_API_KEY` is optional. The provider must support both JSON-RPC
+`eth_getLogs`/block/transaction methods and `/walletsolidity/getnowblock`.
+`--batch-size` defaults to 500 blocks and shrinks failed ranges automatically.
+`--to-block` is inclusive and must not exceed the confirmed head.
+
+Writes use existing indexer migrations and tables. A dedicated checkpoint
+`tron.ormp-recovery.v1` resumes later invocations; `--from-block` only initializes
+that checkpoint. Events and progress commit in the same transaction. A PostgreSQL
+session advisory lock prevents overlapping invocations. Missing source data for
+the latest already-imported Tron root stops recovery for manual investigation.
+Dry-run always scans the explicit range and ignores saved progress.
+
+The temporary Kubernetes CronJob runs this command every five minutes under
+`apps/ringdao/ormpindexer` in devows/infra. To retire it, suspend/remove that
+CronJob, then remove `src/tron_recovery/`, its fixture directory, and the command
+wiring in `src/main.rs` and `src/lib.rs`. Keep recovered business rows. No normal
+Tron chain configuration or Datalens service needs to be restored.
+
+Recovery tests use a disposable PostgreSQL database selected only through
+`ORMPINDEXER_RECOVERY_TEST_DATABASE_URL`; the database test truncates its tables.

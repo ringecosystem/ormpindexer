@@ -29,6 +29,8 @@ enum Command {
         listen_addr: String,
     },
     Migrate,
+    /// Temporarily recover confirmed Tron messages directly into the ORMP database.
+    TronRecovery(ormpindexer::tron_recovery::Args),
 }
 
 #[tokio::main]
@@ -46,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Serve { listen_addr } => serve(&listen_addr).await,
         Command::Migrate => migrate().await,
+        Command::TronRecovery(args) => ormpindexer::tron_recovery::run(args).await,
     }
 }
 
