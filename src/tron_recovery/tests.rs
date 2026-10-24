@@ -230,6 +230,10 @@ async fn database_replay_resume_lock_conflict_and_rollback() {
     );
     assert_eq!(sent.1, "0x223b34a39c5f1cddd76e02ab433f6624b565abbc");
 
+    sqlx::query("UPDATE ormp_message_accepted SET log_index = 999")
+        .execute(&pool)
+        .await
+        .unwrap();
     // Preserve an assignment ID produced by the retired indexer during replay.
     sqlx::query("UPDATE ormp_message_assigned SET id = 'legacy-tron-assignment'")
         .execute(&pool)
@@ -260,6 +264,11 @@ async fn database_replay_resume_lock_conflict_and_rollback() {
         .await
         .unwrap();
     assert_eq!(id, "legacy-tron-assignment");
+    let log_index: i32 = sqlx::query_scalar("SELECT log_index FROM ormp_message_accepted")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(log_index, 999);
 
     // Dry-run ignores an available database and never advances saved progress.
     sqlx::query("UPDATE ormp_indexer_checkpoint SET next_block = 87383828")

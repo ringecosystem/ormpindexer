@@ -84,6 +84,20 @@ impl RecoveryStore {
         let mut events = events.to_vec();
         for event in &mut events {
             self.check_existing(event).await?;
+            if let LegacyOrmPEvent::MessageAccepted {
+                metadata, msg_hash, ..
+            } = event
+            {
+                // Retired Tron indexing could use a transaction-local event index.
+                // Keep existing metadata when replaying an otherwise identical message.
+                let existing: Option<(String, i32)> = sqlx::query_as(
+                    "SELECT block_timestamp::TEXT, log_index FROM ormp_message_accepted WHERE id = $1",
+                ).bind(msg_hash.as_str()).fetch_optional(&self.pool).await?;
+                if let Some((timestamp, log_index)) = existing {
+                    metadata.block_timestamp = timestamp.parse()?;
+                    metadata.log_index = log_index;
+                }
+            }
             // Legacy Tron rows used another event-id format. Preserve that ID when
             // replaying the same assignment instead of creating a duplicate row.
             if let LegacyOrmPEvent::MessageAssigned {
